@@ -23,9 +23,10 @@ class Professor:
 
 
 class Section:
-    def __init__(self, section_id, course_id):
+    def __init__(self, section_id, course_id, activity_type=""):
         self.id = section_id
         self.course_id = course_id
+        self.activity_type = activity_type  # "lecture", "lab", or "activity"
 
 
 class Slot:
@@ -38,40 +39,44 @@ class Slot:
 
 class Scheduler:
     def __init__(self, db_path=DATABASE):
-        self.db_path = db_path
-        self.sections = []
-        self.professors = []
-        self.slots = []
-        self.slot_by_id = {}
+        self.db_path = db_path      #path to the database
+        self.sections = []          #blank list of Sections
+        self.professors = []        #blank list of Professors
+        self.slots = []             #blank list of Slots
+        self.slot_by_id = {}        #blank dictionary of Slots with id
 
+    #loading data from DB to Scheduler
     def load(self):
         #SQLite cursor to read from database
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
-        #store sections list from DB
-        cur.execute("SELECT section_id, class_id FROM db_classes")
-        self.sections = [Section(r[0], r[1]) for r in cur.fetchall()]
+        #store sections list from DB (class_type: Lecture, Lab, or Activity)
+        cur.execute("SELECT section_id, class_id, class_type FROM db_classes")
+        self.sections = [Section(r[0], r[1], (r[2] or "").strip()) for r in cur.fetchall()]
 
-        #read faculty from DB
+        #store all professors in temp var prof_names, used for next 2 operations
         cur.execute("SELECT faculty_name FROM faculty ORDER BY faculty_code")
         prof_names = [r[0] for r in cur.fetchall()]
 
         #store availability from DB
         cur.execute("""SELECT f.faculty_name, a.day_of_week, a.start_time, a.end_time
             FROM availability a JOIN faculty f ON a.faculty_code = f.faculty_code""")
+        #avail is dict of lists(prof, day)
         avail = defaultdict(lambda: defaultdict(list))
         for prof, day, start, end in cur.fetchall():
             avail[prof][day].append((start, end))
+            #avail holds all timeslots that are available for a professor
 
         #store can_teach from DB
         cur.execute("""SELECT f.faculty_name, fc.course_id
             FROM faculty_can_teach fc JOIN faculty f ON fc.faculty_code = f.faculty_code""")
+        #can_teach is a set of can_teach classes
         can_teach = defaultdict(set)
         for prof, course in cur.fetchall():
             can_teach[prof].add(course)
 
-        #build professor objects with their availability and courses
+        #Create Professor object for the time slots available and list of classes the one can teach
         self.professors = [
             Professor(name, can_teach[name], dict(avail[name]))
             for name in prof_names
@@ -84,55 +89,130 @@ class Scheduler:
 
         conn.close()
 
+
     def solve(self):
-        #model contains all the restrictions we need to create a schedule
+        """
+       Find a valid schedule. Idea: each "assignment" (section + professor + time slot)
+       is a yes/no decision. We list all allowed assignments, add rules, then let the
+       solver pick which ones to use.
+        """
+        # solving model: https://developers.google.com/optimization/scheduling/employee_scheduling
+        # scheduling example: https://github.com/google/or-tools/blob/stable/examples/contrib/school_scheduling_sat.py
+
         model = cp_model.CpModel()
 
-        #store section-prof-slot options and group them for constraints
-        vars_all = {}
-        vars_per_section = defaultdict(list)
-        vars_per_prof_slot = defaultdict(list)
+        # --- STEP 1: List every allowed assignment (section, professor, slot) ---
+        # For each such triple we create one variable: 1 = "use this", 0 = "don't".
+        # We also group them: by section (for "each section gets one slot") and
+        # by (professor, slot) (for "professor can't do two classes in same slot").
 
-        #each section is traversed
-        for sec in self.sections:
-            #try to match professor with section if prof can teach it and is available
+        assignment_var = {}           # (section_id, prof_name, slot_id) -> variable
+        vars_for_section = defaultdict(list)   # section_id -> [vars that assign this section]
+        vars_for_prof_slot = defaultdict(list) # (prof_name, slot_id) -> [vars that use this prof+slot]
+
+        for section in self.sections:
             for prof in self.professors:
-                if sec.course_id not in prof.can_teach:
+                if section.course_id not in prof.can_teach:
                     continue
-                #compare each time slot for a section
                 for slot in self.slots:
                     if not prof.is_available(slot.days, slot.start, slot.end):
-                        #not available - continue checking
                         continue
-                    #store section-prof-slot table for all possible options
-                    key = (sec.id, prof.name, slot.id)
-                    #add each option to the model, all set to 0 by default
+                    # This assignment is allowed: create one 0/1 variable for it
+                    key = (section.id, prof.name, slot.id)
                     var = model.NewBoolVar(str(key))
-                    vars_all[key] = var
-                    vars_per_section[sec.id].append(var)
-                    vars_per_prof_slot[(prof.name, slot.id)].append(var)
+                    assignment_var[key] = var
+                    vars_for_section[section.id].append(var)
+                    vars_for_prof_slot[(prof.name, slot.id)].append(var)
 
-        #each section gets exactly one slot
-        for sec in self.sections:
-            model.Add(sum(vars_per_section[sec.id]) == 1)
+        # --- STEP 2: Rule "each section gets exactly one slot" ---
+        # Sum of all variables for that section must be 1 (exactly one assignment chosen).
+        for section in self.sections:
+            model.Add(sum(vars_for_section[section.id]) == 1)
 
-        #professor cannot teach two classes at same time
+        # --- STEP 3: Rule "professor cannot teach overlapping times" ---
+        # Your DB may contain multiple `slot_id`s whose time intervals overlap
+        # (for example, one slot could be 09:00-09:50 and another 09:30-12:15).
+        # So we must block BOTH:
+        #   3a) the same exact (professor, slot_id) being used twice
+        #   3b) different slot_ids that overlap in clock time on at least one day.
         for prof in self.professors:
             for slot in self.slots:
-                model.Add(sum(vars_per_prof_slot[(prof.name, slot.id)]) <= 1)
+                model.Add(sum(vars_for_prof_slot[(prof.name, slot.id)]) <= 1)
 
-        #solve and store result, compare to optimal and feasible options
+        # --- 3b) Different slot_ids that overlap in clock time ---
+        # If two slots overlap and share at least one day letter (e.g. both contain 'F'),
+        # then a professor cannot be assigned to both of them.
+        def _to_minutes(hhmm):
+            h, m = hhmm.split(":")
+            return int(h) * 60 + int(m)
+
+        slot_start_end = {s.id: (_to_minutes(s.start), _to_minutes(s.end)) for s in self.slots}
+        slot_days_set = {s.id: set(s.days) for s in self.slots}  # slot_id -> {'M','W',...}
+
+        overlap_pairs = []
+        slot_list = list(self.slots)
+        for i in range(len(slot_list)):
+            a = slot_list[i]
+            a_s, a_e = slot_start_end[a.id]
+            a_days = slot_days_set[a.id]
+            for j in range(i + 1, len(slot_list)):
+                b = slot_list[j]
+                # If they don't share any day letter, they cannot overlap for the professor.
+                if not (a_days & slot_days_set[b.id]):
+                    continue
+                b_s, b_e = slot_start_end[b.id]
+                # Overlap test on clock interval: [a_s, a_e) intersects [b_s, b_e)
+                # (end is exclusive, so back-to-back slots like 09:00-09:30 and 09:30-10:00
+                # are allowed).
+                if a_s < b_e and b_s < a_e:
+                    overlap_pairs.append((a.id, b.id))
+
+        for prof in self.professors:
+            for slot1_id, slot2_id in overlap_pairs:
+                vars1 = vars_for_prof_slot[(prof.name, slot1_id)]
+                vars2 = vars_for_prof_slot[(prof.name, slot2_id)]
+                if not vars1 or not vars2:
+                    continue
+                # At most one of the two overlapping slots can be chosen for this professor.
+                model.Add(sum(vars1) + sum(vars2) <= 1)
+
+        # --- STEP 4: Prefer balanced week
+        # Count how many classes fall on each weekday; minimize the maximum.
+        # So we prefer schedules where no single day is overloaded.
+        slot_to_days = {s.id: set(s.days) for s in self.slots}  # "MW" -> {'M','W'}
+        vars_on_day = defaultdict(list)  # 'M' -> [all vars that put a class on Monday]
+        for (sec_id, prof_name, slot_id), var in assignment_var.items():
+            for day in slot_to_days[slot_id]:
+                vars_on_day[day].append(var)
+        max_classes_any_day = model.NewIntVar(0, len(self.sections), "max_per_day")
+        for day in "MTWRF":
+            if vars_on_day[day]:
+                model.Add(max_classes_any_day >= sum(vars_on_day[day]))
+        model.Minimize(max_classes_any_day)
+
+        # --- STEP 5: Run the solver ---
         solver = cp_model.CpSolver()
-        if solver.Solve(model) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        status = solver.Solve(model)
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             return None
 
-        #extract the chosen assignments from the solution
+        # --- STEP 6: Read back the solution ---
+        # Every variable that is 1 in the solution is a chosen assignment.
+        section_by_id = {s.id: s for s in self.sections}
         result = []
-        for (sec_id, prof_name, slot_id), var in vars_all.items():
+        for (sec_id, prof_name, slot_id), var in assignment_var.items():
             if solver.Value(var) == 1:
                 slot = self.slot_by_id[slot_id]
-                result.append((sec_id, slot.days, slot.start + "-" + slot.end, prof_name))
+                activity_type = section_by_id[sec_id].activity_type
+                result.append((sec_id, activity_type, slot.days, slot.start + "-" + slot.end, prof_name))
         return result
+
+
+def print_schedule(result):
+    print("\nSchedule:")
+    print(f"{'Section':<14}\t{'Type':<10}\t{'Days':<5}\t{'Time':<14}\tProfessor")
+    for sec, typ, days, tim, prof in sorted(result, key=lambda r: (r[0], r[3])):
+        print(f"{sec:<14}\t{typ:<10}\t{days:<5}\t{tim:<14}\t{prof}")
 
 
 def main():
@@ -149,10 +229,7 @@ def main():
         print("No solution.")
         return
 
-    #solution output
-    print("Schedule:")
-    for r in result:
-        print(r[0], r[1], r[2], r[3])
+    print_schedule(result)
 
 
 if __name__ == "__main__":
