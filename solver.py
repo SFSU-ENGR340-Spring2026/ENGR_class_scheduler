@@ -23,18 +23,20 @@ class Professor:
 
 
 class Section:
-    def __init__(self, section_id, course_id, activity_type=""):
+    def __init__(self, section_id, course_id, activity_type="", slot_type=""):
         self.id = section_id
         self.course_id = course_id
-        self.activity_type = activity_type  # "lecture", "lab", or "activity"
+        self.activity_type = activity_type  # Lecture / Lab / Activity
+        self.slot_type = slot_type  # e.g. 50min_lecture — must match time_slots.slot_type
 
 
 class Slot:
-    def __init__(self, slot_id, days, start, end):
+    def __init__(self, slot_id, days, start, end, slot_type=""):
         self.id = slot_id
         self.days = days
         self.start = start
         self.end = end
+        self.slot_type = slot_type  # e.g. 50min_lecture, 75min_lecture
 
 
 class Scheduler:
@@ -51,9 +53,12 @@ class Scheduler:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
-        #store sections list from DB (class_type: Lecture, Lab, or Activity)
-        cur.execute("SELECT section_id, class_id, class_type FROM db_classes")
-        self.sections = [Section(r[0], r[1], (r[2] or "").strip()) for r in cur.fetchall()]
+        #store sections from DB (class_type + slot_type must match a time_slots row later)
+        cur.execute("SELECT section_id, class_id, class_type, slot_type FROM db_classes")
+        self.sections = [
+            Section(r[0], r[1], (r[2] or "").strip(), (r[3] or "").strip())
+            for r in cur.fetchall()
+        ]
 
         #store all professors in temp var prof_names, used for next 2 operations
         cur.execute("SELECT faculty_name FROM faculty ORDER BY faculty_code")
@@ -82,9 +87,11 @@ class Scheduler:
             for name in prof_names
         ]
 
-        #store time slots from DB
-        cur.execute("SELECT slot_id, day_pattern, start_time, end_time FROM time_slots")
-        self.slots = [Slot(r[0], r[1], r[2], r[3]) for r in cur.fetchall()]
+        #store time slots from DB (slot_type links to db_classes.slot_type)
+        cur.execute(
+            "SELECT slot_id, day_pattern, start_time, end_time, slot_type FROM time_slots"
+        )
+        self.slots = [Slot(r[0], r[1], r[2], r[3], (r[4] or "").strip()) for r in cur.fetchall()]
         self.slot_by_id = {s.id: s for s in self.slots}
 
         conn.close()
@@ -115,6 +122,12 @@ class Scheduler:
                 if section.course_id not in prof.can_teach:
                     continue
                 for slot in self.slots:
+                    # Section duration/type must match the slot row (50min vs 75min, etc.)
+                    if section.slot_type != slot.slot_type:
+                        continue
+                    # 50-minute lectures meet 3x/week → only MWF slots in this DB
+                    if section.slot_type == "50min_lecture" and slot.days != "MWF":
+                        continue
                     if not prof.is_available(slot.days, slot.start, slot.end):
                         continue
                     # This assignment is allowed: create one 0/1 variable for it
