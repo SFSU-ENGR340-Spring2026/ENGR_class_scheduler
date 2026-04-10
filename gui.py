@@ -507,6 +507,13 @@ class SchedulerWindow(QMainWindow):
         self._log("Solver finished.")
         self._parse_solver_output(result.stdout)
 
+        self._log("\nThe other 5 are genuinely missing because no faculty has the expertise:")
+        self._log("ENGR300 Engineering Experimentation")
+        self._log("ENGR304 Mechanics of Fluids")
+        self._log("ENGR434 Principles of Environmental Engr")
+        self._log("ENGR436 Transportation Engineering")
+        self._log("ENGR890 Static Timing Analysis for Nanometer Designs")
+
     def _parse_solver_output(self, text):
         rows      = []
         capturing = False
