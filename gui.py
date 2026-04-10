@@ -1,6 +1,5 @@
 """
 ENGR Class Scheduler - GUI
-A simple desktop app that runs the solver and shows the schedule.
 Built with PySide6 for the window/table, and Plotly for the Gantt chart.
 """
 
@@ -83,7 +82,7 @@ def build_gantt_html(rows):
                 ss=ss, es=es, s=s, e=e
             ))
 
-    # Interval graph coloring — assign lane_idx so no two overlapping bars share a lane
+    # Interval graph coloring — no two overlapping bars share a lane
     final_bars = []
     for d, day_bars in enumerate(bars_by_day):
         if not day_bars:
@@ -109,7 +108,7 @@ def build_gantt_html(rows):
 
     fig = go.Figure()
 
-    # Background shading + dividers as layout shapes (always visible, not tied to traces)
+    # Decorative background only — no bar content drawn here
     bg_shapes = []
     bg = ["#f5f5f5","#ffffff","#f5f5f5","#ffffff","#f5f5f5"]
     for d in range(5):
@@ -128,12 +127,12 @@ def build_gantt_html(rows):
             line=dict(color="#bbbbbb", width=2), layer="below",
         ))
 
-    # Also add colored rect shapes for the bars (so they show even when trace is visible)
+    # One Scatter trace per professor — bars are ONLY drawn here,
+    # so hiding the trace truly removes the bars from the chart.
     bars_by_prof = defaultdict(list)
     for bar in final_bars:
         bars_by_prof[bar["prof"]].append(bar)
 
-    # One Plotly trace per professor — clicking legend toggles their bars
     for prof in all_profs:
         color   = prof_color[prof]
         px_list = []
@@ -161,12 +160,6 @@ def build_gantt_html(rows):
                    f"Day: {day_labels[d]}")
             hover += [tip, tip, tip, tip, tip, None]
 
-            bg_shapes.append(dict(
-                type="rect", x0=x0, x1=x1, y0=s, y1=e,
-                fillcolor=color, opacity=0.90,
-                line=dict(color="white", width=1.5), layer="above",
-            ))
-
         fig.add_trace(go.Scatter(
             x=px_list, y=py_list,
             mode="lines",
@@ -180,7 +173,7 @@ def build_gantt_html(rows):
             opacity=0.90,
         ))
 
-    # Short labels inside each bar
+    # Short labels inside bars (annotations — always visible but just tiny text)
     label_annotations = []
     for bar in final_bars:
         d  = bar["d"]
@@ -248,9 +241,9 @@ def build_gantt_html(rows):
     padding: 8px 12px 0 12px;
   }
   #btn-bar button {
-    padding: 5px 16px;
+    padding: 5px 18px;
     font-size: 12px;
-    border: 1px solid #cccccc;
+    border: 1.5px solid #cccccc;
     border-radius: 5px;
     background: #f7f7f7;
     cursor: pointer;
@@ -265,29 +258,32 @@ def build_gantt_html(rows):
   <button id="btn-show-all">Show All</button>
 </div>
 <script>
-function waitForPlot(callback) {
-    var tries = 0;
-    var interval = setInterval(function() {
-        var plot = document.querySelector('.plotly-graph-div');
-        if (plot && plot.data && plot.data.length > 0) {
-            clearInterval(interval);
-            callback(plot);
+function waitForPlot(cb) {
+    var n = 0;
+    var t = setInterval(function() {
+        var el = document.querySelector('.plotly-graph-div');
+        if (el && el.data && el.data.length > 0) {
+            clearInterval(t);
+            cb(el);
         }
-        if (++tries > 100) clearInterval(interval);
+        if (++n > 150) clearInterval(t);
     }, 100);
 }
+
 waitForPlot(function(plot) {
-    Plotly.relayout(plot, {dragmode: 'zoom'});
     document.getElementById('btn-hide-all').addEventListener('click', function() {
-        var updates = plot.data.map(function() { return 'legendonly'; });
-        Plotly.restyle(plot, {visible: updates});
-        document.getElementById('btn-hide-all').classList.add('active');
+        var indices = [];
+        for (var i = 0; i < plot.data.length; i++) indices.push(i);
+        Plotly.restyle(plot, { visible: 'legendonly' }, indices);
+        this.classList.add('active');
         document.getElementById('btn-show-all').classList.remove('active');
     });
+
     document.getElementById('btn-show-all').addEventListener('click', function() {
-        var updates = plot.data.map(function() { return true; });
-        Plotly.restyle(plot, {visible: updates});
-        document.getElementById('btn-show-all').classList.add('active');
+        var indices = [];
+        for (var i = 0; i < plot.data.length; i++) indices.push(i);
+        Plotly.restyle(plot, { visible: true }, indices);
+        this.classList.add('active');
         document.getElementById('btn-hide-all').classList.remove('active');
     });
 });
@@ -297,6 +293,7 @@ waitForPlot(function(plot) {
         raw_html = raw_html.replace("<body>", "<body>" + inject, 1)
     else:
         raw_html = inject + raw_html
+
     return raw_html
 
 
@@ -317,9 +314,9 @@ class SchedulerWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
-        main_layout = QHBoxLayout(root)
-        main_layout.addWidget(self._build_left_panel(), 2)
-        main_layout.addWidget(self._build_right_panel(), 5)
+        layout = QHBoxLayout(root)
+        layout.addWidget(self._build_left_panel(), 2)
+        layout.addWidget(self._build_right_panel(), 5)
 
     def _build_left_panel(self):
         panel  = QWidget()
@@ -477,10 +474,12 @@ class SchedulerWindow(QMainWindow):
 
     def _run_solver(self):
         if not self.solver_path.exists():
-            QMessageBox.warning(self, "Missing file", f"solver.py not found at:\n{self.solver_path}")
+            QMessageBox.warning(self, "Missing file",
+                                f"solver.py not found at:\n{self.solver_path}")
             return
         if not self.db_path.exists():
-            QMessageBox.warning(self, "Missing file", f"db_classes.db not found at:\n{self.db_path}")
+            QMessageBox.warning(self, "Missing file",
+                                f"db_classes.db not found at:\n{self.db_path}")
             return
 
         self._log("\nRunning solver...")
@@ -501,7 +500,8 @@ class SchedulerWindow(QMainWindow):
             self._log(result.stderr.strip())
 
         if result.returncode != 0:
-            QMessageBox.warning(self, "Solver failed", "Solver exited with an error. Check the log.")
+            QMessageBox.warning(self, "Solver failed",
+                                "Solver exited with an error. Check the log.")
             return
 
         self._log("Solver finished.")
@@ -575,6 +575,6 @@ def main():
     window.show()
     sys.exit(app.exec())
 
-4
+
 if __name__ == "__main__":
     main()
