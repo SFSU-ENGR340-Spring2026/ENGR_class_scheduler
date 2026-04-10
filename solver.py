@@ -7,6 +7,13 @@ from ortools.sat.python import cp_model
 DATABASE = "db_classes.db"
 
 
+def display_professor(name):
+    if name is None:
+        return "N/A"
+    s = str(name).strip()
+    return s if s else "N/A"
+
+
 class Professor:
     def __init__(self, name, can_teach, availability):
         self.name = name
@@ -23,18 +30,21 @@ class Professor:
 
 
 class Section:
-    def __init__(self, section_id, course_id, activity_type=""):
+    def __init__(self, section_id, course_id, activity_type="", slot_type="", units=None):
         self.id = section_id
         self.course_id = course_id
-        self.activity_type = activity_type  # "lecture", "lab", or "activity"
+        self.activity_type = activity_type  # Lecture / Lab / Activity
+        self.slot_type = slot_type  # e.g. 50min_lecture — must match time_slots.slot_type
+        self.units = float(units) if units is not None else None
 
 
 class Slot:
-    def __init__(self, slot_id, days, start, end):
+    def __init__(self, slot_id, days, start, end, slot_type=""):
         self.id = slot_id
         self.days = days
         self.start = start
         self.end = end
+        self.slot_type = slot_type  # e.g. 50min_lecture, 75min_lecture
 
 
 class Scheduler:
@@ -51,9 +61,13 @@ class Scheduler:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
-        #store sections list from DB (class_type: Lecture, Lab, or Activity)
-        cur.execute("SELECT section_id, class_id, class_type FROM db_classes")
-        self.sections = [Section(r[0], r[1], (r[2] or "").strip()) for r in cur.fetchall()]
+        #store sections from DB (class_type + slot_type must match a time_slots row later)
+        # DB column is `capacity`; used as credit units for 50min MWF vs MW/TR rules.
+        cur.execute("SELECT section_id, class_id, class_type, slot_type, capacity FROM db_classes")
+        self.sections = [
+            Section(r[0], r[1], (r[2] or "").strip(), (r[3] or "").strip(), r[4])
+            for r in cur.fetchall()
+        ]
 
         #store all professors in temp var prof_names, used for next 2 operations
         cur.execute("SELECT faculty_name FROM faculty ORDER BY faculty_code")
@@ -82,9 +96,11 @@ class Scheduler:
             for name in prof_names
         ]
 
-        #store time slots from DB
-        cur.execute("SELECT slot_id, day_pattern, start_time, end_time FROM time_slots")
-        self.slots = [Slot(r[0], r[1], r[2], r[3]) for r in cur.fetchall()]
+        #store time slots from DB (slot_type links to db_classes.slot_type)
+        cur.execute(
+            "SELECT slot_id, day_pattern, start_time, end_time, slot_type FROM time_slots"
+        )
+        self.slots = [Slot(r[0], r[1], r[2], r[3], (r[4] or "").strip()) for r in cur.fetchall()]
         self.slot_by_id = {s.id: s for s in self.slots}
 
         conn.close()
@@ -115,6 +131,21 @@ class Scheduler:
                 if section.course_id not in prof.can_teach:
                     continue
                 for slot in self.slots:
+                    # Section duration/type must match the slot row (50min vs 75min, etc.)
+                    if section.slot_type != slot.slot_type:
+                        continue
+                    # 50-min: 3-unit → MWF; else MW or TR. 75-min: MW or TR only (policy).
+                    if section.slot_type == "50min_lecture":
+                        u = section.units
+                        if u == 3.0:
+                            if slot.days != "MWF":
+                                continue
+                        else:
+                            if slot.days not in ("MW", "TR"):
+                                continue
+                    elif section.slot_type == "75min_lecture":
+                        if slot.days not in ("MW", "TR"):
+                            continue
                     if not prof.is_available(slot.days, slot.start, slot.end):
                         continue
                     # This assignment is allowed: create one 0/1 variable for it
@@ -176,19 +207,26 @@ class Scheduler:
                 # At most one of the two overlapping slots can be chosen for this professor.
                 model.Add(sum(vars1) + sum(vars2) <= 1)
 
-        # --- STEP 4: Prefer balanced week
-        # Count how many classes fall on each weekday; minimize the maximum.
-        # So we prefer schedules where no single day is overloaded.
+        # --- STEP 4: Prefer balanced week (minimize max−min meetings per weekday) ---
         slot_to_days = {s.id: set(s.days) for s in self.slots}  # "MW" -> {'M','W'}
         vars_on_day = defaultdict(list)  # 'M' -> [all vars that put a class on Monday]
         for (sec_id, prof_name, slot_id), var in assignment_var.items():
             for day in slot_to_days[slot_id]:
                 vars_on_day[day].append(var)
         max_classes_any_day = model.NewIntVar(0, len(self.sections), "max_per_day")
+        min_classes_any_day = model.NewIntVar(0, len(self.sections), "min_per_day")
         for day in "MTWRF":
-            if vars_on_day[day]:
-                model.Add(max_classes_any_day >= sum(vars_on_day[day]))
-        model.Minimize(max_classes_any_day)
+            vlist = vars_on_day[day]
+            if vlist:
+                day_sum = sum(vlist)
+                model.Add(max_classes_any_day >= day_sum)
+                model.Add(min_classes_any_day <= day_sum)
+            else:
+                model.Add(max_classes_any_day >= 0)
+                model.Add(min_classes_any_day <= 0)
+        day_spread = model.NewIntVar(0, len(self.sections), "day_spread")
+        model.Add(day_spread + min_classes_any_day == max_classes_any_day)
+        model.Minimize(day_spread)
 
         # --- STEP 5: Run the solver ---
         solver = cp_model.CpSolver()
@@ -204,7 +242,7 @@ class Scheduler:
             if solver.Value(var) == 1:
                 slot = self.slot_by_id[slot_id]
                 activity_type = section_by_id[sec_id].activity_type
-                result.append((sec_id, activity_type, slot.days, slot.start + "-" + slot.end, prof_name))
+                result.append((sec_id, activity_type, slot.days, slot.start + "-" + slot.end, display_professor(prof_name)))
         return result
 
 
@@ -212,7 +250,7 @@ def print_schedule(result):
     print("\nSchedule:")
     print(f"{'Section':<14}\t{'Type':<10}\t{'Days':<5}\t{'Time':<14}\tProfessor")
     for sec, typ, days, tim, prof in sorted(result, key=lambda r: (r[0], r[3])):
-        print(f"{sec:<14}\t{typ:<10}\t{days:<5}\t{tim:<14}\t{prof}")
+        print(f"{sec:<14}\t{typ:<10}\t{days:<5}\t{tim:<14}\t{display_professor(prof)}")
 
 
 def main():
