@@ -1,14 +1,18 @@
-import csv
-import sqlite3
+"""
+ENGR Class Scheduler - GUI
+Main window, Gantt chart, and entry point.
+Tab classes live in tabs.py. DB functions live in db.py.
+"""
+
+import platform
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
 
-import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -20,149 +24,397 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
-    QPushButton,
     QPlainTextEdit,
-    QSplitter,
+    QPushButton,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from tabs import SectionsTab, FacultyTab, TimeSlotsTab
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+PALETTE = [
+    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
+    "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#aecfd6",
+    "#d37295", "#fabfd2", "#8cd17d", "#86bcb6", "#499894",
+    "#f1ce63", "#79706e", "#d4a6c8", "#b6992d", "#a0cbe8",
+]
+DAY_ORDER  = ["M", "T", "W", "R", "F"]
+DAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+DAY_WIDTH  = 1.8
+DAY_GAP    = 0.4
+BAR_PAD    = 0.015
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+def time_to_minutes(t):
+    h, m = t.split(":")
+    return int(h) * 60 + int(m)
+
+
+def open_folder(path):
+    system = platform.system()
+    if system == "Windows":
+        subprocess.run(["explorer", str(path)], check=False)
+    elif system == "Darwin":
+        subprocess.run(["open", str(path)], check=False)
+    else:
+        subprocess.run(["xdg-open", str(path)], check=False)
+
+
+def parse_solver_output(text):
+    # read each line of solver output and collect the schedule rows
+    rows = []
+    capturing = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s == "Schedule:":
+            capturing = True
+            continue
+        if not capturing or not s or s.startswith("Section"):
+            continue
+        parts = [p.strip() for p in line.split("\t")]
+        if len(parts) >= 5:
+            rows.append(parts[:5])
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Gantt chart
+# ---------------------------------------------------------------------------
+
+def assign_lanes(bars):
+    # sort bars by start time so we process them in order
+    bars.sort(key=lambda b: (b["s"], b["e"]))
+    lane_of = [-1] * len(bars)
+    for i in range(len(bars)):
+        # find which lanes are already taken by overlapping earlier bars
+        used = set()
+        for j in range(i):
+            if bars[j]["s"] < bars[i]["e"] and bars[j]["e"] > bars[i]["s"]:
+                used.add(lane_of[j])
+        # assign the lowest available lane
+        lane = 0
+        while lane in used:
+            lane += 1
+        lane_of[i] = lane
+    total = max(lane_of) + 1
+    for i, bar in enumerate(bars):
+        bar["lane_idx"] = lane_of[i]
+        bar["total_lanes"] = total
+    return bars
+
+
+def day_x(d):
+    return d * (DAY_WIDTH + DAY_GAP)
+
+
+def bar_coords(bar):
+    bw = DAY_WIDTH / bar["total_lanes"]
+    x0 = day_x(bar["d"]) + bar["lane_idx"] * bw + BAR_PAD
+    x1 = day_x(bar["d"]) + (bar["lane_idx"] + 1) * bw - BAR_PAD
+    return x0, x1
+
+
+def build_gantt_html(rows):
+    if not rows:
+        return "<html><body><p>No data to show.</p></body></html>"
+
+    # assign a color to each professor
+    all_profs = sorted({r[4] for r in rows if len(r) >= 5})
+    prof_color = {}
+    for i, p in enumerate(all_profs):
+        prof_color[p] = PALETTE[i % len(PALETTE)]
+
+    # parse each schedule row into a bar dict, grouped by day
+    bars_by_day = [[], [], [], [], []]
+    for row in rows:
+        if len(row) < 5:
+            continue
+        section, ctype, days, time_str, prof = row
+        try:
+            ss, es = time_str.split("-")
+            s = time_to_minutes(ss)
+            e = time_to_minutes(es)
+        except Exception:
+            continue
+        for ch in days:
+            if ch in DAY_ORDER:
+                d = DAY_ORDER.index(ch)
+                bars_by_day[d].append(dict(section=section, ctype=ctype, prof=prof,
+                                           ss=ss, es=es, s=s, e=e))
+
+    # assign non-overlapping lanes per day, then flatten into one list
+    all_bars = []
+    for d in range(5):
+        if bars_by_day[d]:
+            for bar in assign_lanes(bars_by_day[d]):
+                bar["d"] = d
+                all_bars.append(bar)
+
+    fig = go.Figure()
+
+    # draw alternating column backgrounds and divider lines
+    shapes = []
+    bg_colors = ["#f5f5f5", "#ffffff", "#f5f5f5", "#ffffff", "#f5f5f5"]
+    for d in range(5):
+        shapes.append(dict(type="rect", x0=day_x(d), x1=day_x(d) + DAY_WIDTH,
+                           y0=480, y1=1320, fillcolor=bg_colors[d],
+                           opacity=1.0, line=dict(width=0), layer="below"))
+    for d in range(1, 5):
+        shapes.append(dict(type="line", x0=day_x(d) - DAY_GAP / 2, x1=day_x(d) - DAY_GAP / 2,
+                           y0=480, y1=1320, line=dict(color="#bbbbbb", width=2), layer="below"))
+
+    # draw one Scatter trace per professor so legend click shows/hides their bars
+    bars_by_prof = defaultdict(list)
+    for bar in all_bars:
+        bars_by_prof[bar["prof"]].append(bar)
+
+    for prof in all_profs:
+        px = []
+        py = []
+        hover = []
+        for bar in bars_by_prof[prof]:
+            x0, x1 = bar_coords(bar)
+            px += [x0, x1, x1, x0, x0, None]
+            py += [bar["s"], bar["s"], bar["e"], bar["e"], bar["s"], None]
+            tip = (f"<b>{bar['section']}</b><br>"
+                   f"Type: {bar['ctype']}<br>"
+                   f"Prof: {prof}<br>"
+                   f"Time: {bar['ss']} \u2013 {bar['es']}<br>"
+                   f"Day: {DAY_LABELS[bar['d']]}")
+            hover += [tip, tip, tip, tip, tip, None]
+        fig.add_trace(go.Scatter(
+            x=px, y=py,
+            mode="lines",
+            fill="toself",
+            fillcolor=prof_color[prof],
+            line=dict(color="white", width=1.5),
+            name=prof,
+            legendgroup=prof,
+            opacity=0.90,
+            hovertemplate="%{text}<extra></extra>",
+            text=hover,
+        ))
+
+    # add section name labels inside each bar
+    annotations = []
+    for bar in all_bars:
+        x0, x1 = bar_coords(bar)
+        annotations.append(dict(
+            x=(x0 + x1) / 2,
+            y=(bar["s"] + bar["e"]) / 2,
+            text=bar["section"].replace("ENGR", "ENGR "),
+            showarrow=False,
+            textangle=-90,
+            xanchor="center",
+            yanchor="middle",
+            font=dict(size=11, color="white", family="monospace"),
+            xref="x",
+            yref="y",
+        ))
+
+    # configure axes and layout
+    y_vals = list(range(480, 1321, 60))
+    y_text = [f"{v // 60:02d}:00" for v in y_vals]
+    x_ticks = [day_x(d) + DAY_WIDTH / 2 for d in range(5)]
+
+    fig.update_layout(
+        shapes=shapes,
+        annotations=annotations,
+        xaxis=dict(
+            tickmode="array", tickvals=x_ticks, ticktext=DAY_LABELS,
+            side="top", range=[-0.1, day_x(4) + DAY_WIDTH + 0.1],
+            showgrid=False, zeroline=False, fixedrange=False,
+            tickfont=dict(size=13, color="#222222"),
+        ),
+        yaxis=dict(
+            tickmode="array", tickvals=y_vals, ticktext=y_text,
+            autorange="reversed", range=[480, 1320], title="Time",
+            gridcolor="#e0e0e0", zeroline=False, fixedrange=False,
+        ),
+        dragmode="zoom",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=65, r=20, t=70, b=20),
+        hovermode="closest",
+        legend=dict(
+            title="Click to show/hide",
+            orientation="v", x=1.01, y=1,
+            font=dict(size=11),
+            itemclick="toggle",
+            itemdoubleclick="toggleothers",
+        ),
+        height=750,
+        title=dict(
+            text="Weekly Class Schedule  (click legend to filter \u00b7 drag to zoom \u00b7 double-click to reset)",
+            x=0.5,
+            font=dict(size=13),
+        ),
+    )
+
+    raw_html = fig.to_html(include_plotlyjs="cdn", full_html=True)
+
+    # inject Hide All / Show All buttons into the page
+    inject = """
+<style>
+  #btn-bar { display: flex; gap: 8px; padding: 8px 12px 0 12px; }
+  #btn-bar button {
+    padding: 5px 18px; font-size: 12px; border: 1.5px solid #ccc;
+    border-radius: 5px; background: #f7f7f7; cursor: pointer; font-family: sans-serif;
+  }
+  #btn-bar button:hover { background: #e0e0e0; }
+  #btn-bar button.active { background: #4e79a7; color: white; border-color: #4e79a7; }
+</style>
+<div id="btn-bar">
+  <button id="btn-hide">Hide All</button>
+  <button id="btn-show">Show All</button>
+</div>
+<script>
+function waitForPlot(cb) {
+    var n = 0;
+    var t = setInterval(function() {
+        var el = document.querySelector('.plotly-graph-div');
+        if (el && el.data && el.data.length > 0) { clearInterval(t); cb(el); }
+        if (++n > 150) clearInterval(t);
+    }, 100);
+}
+waitForPlot(function(plot) {
+    var idx = plot.data.map(function(_, i) { return i; });
+    document.getElementById('btn-hide').onclick = function() {
+        Plotly.restyle(plot, { visible: 'legendonly' }, idx);
+        this.classList.add('active');
+        document.getElementById('btn-show').classList.remove('active');
+    };
+    document.getElementById('btn-show').onclick = function() {
+        Plotly.restyle(plot, { visible: true }, idx);
+        this.classList.add('active');
+        document.getElementById('btn-hide').classList.remove('active');
+    };
+});
+</script>"""
+
+    if "<body>" in raw_html:
+        raw_html = raw_html.replace("<body>", "<body>" + inject, 1)
+    else:
+        raw_html = inject + raw_html
+
+    return raw_html
+
+
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
 
 class SchedulerWindow(QMainWindow):
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Small ENGR Scheduler")
-        self.resize(1180, 760)
-
+        self.setWindowTitle("ENGR Class Scheduler")
+        self.resize(1400, 860)
         self.project_dir = Path.cwd()
         self.solver_path = self.project_dir / "solver.py"
-        self.db_path = self.project_dir / "db_classes.db"
-
-        self.all_headers = []
-        self.all_rows = []
-
+        self.db_path     = self.project_dir / "db_classes.db"
+        self.all_rows    = []
         self._build_ui()
-        self.refresh_paths()
-        self.log("Ready.")
+        self._refresh_paths()
 
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
+        main = QHBoxLayout(root)
+        main.addWidget(self._build_left_panel(), 3)
+        main.addWidget(self._build_right_panel(), 5)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        layout.addWidget(splitter)
-
-        top = QWidget()
-        top_layout = QHBoxLayout(top)
-        splitter.addWidget(top)
-
-        self.log_box = QPlainTextEdit()
-        self.log_box.setReadOnly(True)
-
-        left_panel = self._build_controls_panel()
-        right_panel = self._build_results_panel()
-        top_layout.addWidget(left_panel, 2)
-        top_layout.addWidget(right_panel, 5)
-
-        splitter.addWidget(self.log_box)
-        splitter.setSizes([620, 140])
-
-    def _build_controls_panel(self):
-        panel = QWidget()
+    def _build_left_panel(self):
+        panel  = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setSpacing(6)
 
-        files_group = QGroupBox("Project Files")
-        files_form = QFormLayout(files_group)
-
+        # project folder picker
+        box  = QGroupBox("Project")
+        form = QFormLayout(box)
         self.project_dir_edit = QLineEdit(str(self.project_dir))
         self.project_dir_edit.setReadOnly(True)
-        self.project_dir_edit.setMinimumWidth(260)
-        browse_project_btn = QPushButton("Browse...")
-        browse_project_btn.clicked.connect(self.pick_project_dir)
-        project_row = QWidget()
-        project_row_layout = QHBoxLayout(project_row)
-        project_row_layout.setContentsMargins(0, 0, 0, 0)
-        project_row_layout.addWidget(self.project_dir_edit)
-        project_row_layout.addWidget(browse_project_btn)
-        files_form.addRow("Project Folder", project_row)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._pick_project_dir)
+        folder_row = QWidget()
+        fl = QHBoxLayout(folder_row)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.addWidget(self.project_dir_edit)
+        fl.addWidget(browse_btn)
+        form.addRow("Folder", folder_row)
+        layout.addWidget(box)
 
-        self.solver_edit = QLineEdit()
-        self.solver_edit.setReadOnly(True)
-        self.solver_edit.setMinimumWidth(260)
-        files_form.addRow("Solver Script", self.solver_edit)
+        # action buttons
+        btn_row = QHBoxLayout()
+        run_btn = QPushButton("▶  Run Solver")
+        run_btn.clicked.connect(self._run_solver)
+        save_btn = QPushButton("💾  Save DB")
+        save_btn.clicked.connect(self._save_db)
+        open_btn = QPushButton("Open Folder")
+        open_btn.clicked.connect(lambda: open_folder(self.project_dir))
+        btn_row.addWidget(run_btn)
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(open_btn)
+        layout.addLayout(btn_row)
 
-        self.db_edit = QLineEdit()
-        self.db_edit.setReadOnly(True)
-        self.db_edit.setMinimumWidth(260)
-        files_form.addRow("Database", self.db_edit)
+        # DB editor tabs
+        self.db_tabs = QTabWidget()
+        self._sections_tab = SectionsTab(self.db_path)
+        self._faculty_tab  = FacultyTab(self.db_path)
+        self._slots_tab    = TimeSlotsTab(self.db_path)
+        self.db_tabs.addTab(self._sections_tab, "Sections")
+        self.db_tabs.addTab(self._faculty_tab,  "Faculty")
+        self.db_tabs.addTab(self._slots_tab,    "Time Slots")
+        layout.addWidget(self.db_tabs)
 
-        layout.addWidget(files_group)
+        # small status log
+        self.log_box = QPlainTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setFixedHeight(60)
+        self.log_box.setStyleSheet("font-size:11px;")
+        layout.addWidget(self.log_box)
 
-        button_row = QHBoxLayout()
-        self.inspect_btn = QPushButton("Inspect DB")
-        self.inspect_btn.clicked.connect(self.inspect_database)
-        self.run_btn = QPushButton("Run Solver")
-        self.run_btn.clicked.connect(self.run_solver)
-        self.refresh_btn = QPushButton("Refresh Preview")
-        self.refresh_btn.clicked.connect(self.load_schedule_preview)
-        button_row.addWidget(self.inspect_btn)
-        button_row.addWidget(self.run_btn)
-        button_row.addWidget(self.refresh_btn)
-        layout.addLayout(button_row)
-
-        open_row = QHBoxLayout()
-        self.open_folder_btn = QPushButton("Open Project Folder")
-        self.open_folder_btn.clicked.connect(self.open_project_folder)
-        clear_log_btn = QPushButton("Clear Log")
-        clear_log_btn.clicked.connect(self.log_box.clear)
-        open_row.addWidget(self.open_folder_btn)
-        open_row.addWidget(clear_log_btn)
-        layout.addLayout(open_row)
-
-        self.db_summary_label = QLabel("Database summary will appear here.")
-        self.db_summary_label.setWordWrap(True)
-        layout.addWidget(self.db_summary_label)
-
-        layout.addStretch()
         return panel
 
-    def _build_results_panel(self):
-        panel = QWidget()
+    def _build_right_panel(self):
+        panel  = QWidget()
         layout = QVBoxLayout(panel)
 
         title = QLabel("Schedule Preview")
-        title.setStyleSheet("font-size: 16px; font-weight: 600;")
+        title.setStyleSheet("font-size:15px; font-weight:bold;")
         layout.addWidget(title)
 
-        self.summary_label = QLabel("No schedule loaded.")
+        self.summary_label = QLabel("No schedule loaded yet.")
         layout.addWidget(self.summary_label)
 
+        # filter bar
         filter_row = QHBoxLayout()
-        self.section_filter_edit = QLineEdit()
-        self.section_filter_edit.setPlaceholderText("Filter by section...")
-        self.section_filter_edit.textChanged.connect(self.apply_filters)
-
-        self.type_filter_edit = QLineEdit()
-        self.type_filter_edit.setPlaceholderText("Filter by type...")
-        self.type_filter_edit.textChanged.connect(self.apply_filters)
-
-        self.prof_filter_edit = QLineEdit()
-        self.prof_filter_edit.setPlaceholderText("Filter by professor...")
-        self.prof_filter_edit.textChanged.connect(self.apply_filters)
-
-        self.day_filter_edit = QLineEdit()
-        self.day_filter_edit.setPlaceholderText("Filter by day...")
-        self.day_filter_edit.textChanged.connect(self.apply_filters)
-
-        filter_row.addWidget(self.section_filter_edit)
-        filter_row.addWidget(self.type_filter_edit)
-        filter_row.addWidget(self.prof_filter_edit)
-        filter_row.addWidget(self.day_filter_edit)
+        self.filter_section = QLineEdit()
+        self.filter_section.setPlaceholderText("Filter section…")
+        self.filter_section.textChanged.connect(self._apply_filters)
+        self.filter_type = QLineEdit()
+        self.filter_type.setPlaceholderText("Filter type…")
+        self.filter_type.textChanged.connect(self._apply_filters)
+        self.filter_prof = QLineEdit()
+        self.filter_prof.setPlaceholderText("Filter professor…")
+        self.filter_prof.textChanged.connect(self._apply_filters)
+        self.filter_day = QLineEdit()
+        self.filter_day.setPlaceholderText("Filter day…")
+        self.filter_day.textChanged.connect(self._apply_filters)
+        filter_row.addWidget(self.filter_section)
+        filter_row.addWidget(self.filter_type)
+        filter_row.addWidget(self.filter_prof)
+        filter_row.addWidget(self.filter_day)
         layout.addLayout(filter_row)
 
         # Create Tab Widget for Table vs Gantt views
@@ -177,143 +429,71 @@ class SchedulerWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.tabs.addTab(self.table, "Table View")
 
-        # Tab 2: Step Ladder (Embedded Web View)
+        # Tab 2: Gantt Chart (Embedded Web View)
         self.web_view = QWebEngineView()
-        self.tabs.addTab(self.web_view, "Weekly Schedule (Gantt)")
-        
-        # Tab 3: Professor Step Ladder (Embedded Web View)
-        self.prof_web_view = QWebEngineView()
-        self.tabs.addTab(self.prof_web_view, "Professor Schedule (Gantt)")
-
-        # Tab 4: Classes Step Ladder (Embedded Web View)
-        self.classes_web_view = QWebEngineView()
-        self.tabs.addTab(self.classes_web_view, "Classes Schedule (Gantt)")
+        self.tabs.addTab(self.web_view, "Gantt Chart")
 
         layout.addWidget(self.tabs)
+
         return panel
 
-    def refresh_paths(self):
-        self.project_dir_edit.setText(str(self.project_dir))
+    def _refresh_paths(self):
         self.solver_path = self.project_dir / "solver.py"
-        self.db_path = self.project_dir / "db_classes.db"
+        self.db_path     = self.project_dir / "db_classes.db"
+        self.project_dir_edit.setText(str(self.project_dir))
+        if self.db_path.exists():
+            self._sections_tab.db_path = self.db_path
+            self._sections_tab.load()
+            self._faculty_tab.db_path = self.db_path
+            self._faculty_tab.load()
+            self._slots_tab.db_path = self.db_path
+            self._slots_tab.load()
+        else:
+            self._log("Database not found.")
 
-        self.solver_edit.setText(str(self.solver_path))
-        self.db_edit.setText(str(self.db_path))
-
-        self.inspect_database()
-        self.load_schedule_preview()
-
-    def pick_project_dir(self):
+    def _pick_project_dir(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose project folder", str(self.project_dir))
         if folder:
             self.project_dir = Path(folder)
-            self.refresh_paths()
-            self.log(f"Project folder set to: {self.project_dir}")
+            self._refresh_paths()
 
-    def log(self, message):
-        self.log_box.appendPlainText(message)
-
-    def run_command(self, command, working_dir):
-        self.log(f"\n$ {' '.join(command)}")
+    def _save_db(self):
+        if not self.db_path.exists():
+            self._log("Database not found.")
+            return
         try:
-            completed = subprocess.run(
-                command,
-                cwd=working_dir,
+            self._sections_tab.save()
+            self._faculty_tab.save()
+            self._slots_tab.save()
+            self._log("Database saved.")
+        except Exception as e:
+            self._log(f"Save error: {e}")
+
+    def _run_solver(self):
+        if not self.solver_path.exists():
+            self._log("solver.py not found.")
+            return
+        if not self.db_path.exists():
+            self._log("Database not found.")
+            return
+        self._log("Running solver…")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(self.solver_path)],
+                cwd=str(self.project_dir),
                 capture_output=True,
                 text=True,
-                check=False,
             )
-        except Exception as exc:
-            self.log(f"Failed to run command: {exc}")
-            QMessageBox.critical(self, "Command Error", str(exc))
-            return None
-
-        if completed.stdout:
-            self.log(completed.stdout.strip())
-        if completed.stderr:
-            self.log(completed.stderr.strip())
-
-        if completed.returncode != 0:
-            QMessageBox.warning(
-                self,
-                "Command Failed",
-                f"Command exited with code {completed.returncode}. See log for details.",
-            )
-        return completed
-
-    def inspect_database(self):
-        if not self.db_path.exists():
-            self.db_summary_label.setText("Database not found.")
+        except Exception as e:
+            self._log(f"Error: {e}")
             return
-
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cur = conn.cursor()
-
-            section_count = self._safe_count(cur, "SELECT COUNT(*) FROM db_classes")
-            faculty_count = self._safe_count(cur, "SELECT COUNT(*) FROM faculty")
-            slot_count = self._safe_count(cur, "SELECT COUNT(*) FROM time_slots")
-            availability_count = self._safe_count(cur, "SELECT COUNT(*) FROM availability")
-            teach_count = self._safe_count(cur, "SELECT COUNT(*) FROM faculty_can_teach")
-
-            conn.close()
-        except Exception as exc:
-            self.db_summary_label.setText(f"Could not inspect DB: {exc}")
+        if result.returncode != 0:
+            self._log(f"Solver failed.\n{result.stderr.strip()}")
             return
-
-        self.db_summary_label.setText(
-            f"Sections: {section_count} | Faculty: {faculty_count} | Slots: {slot_count} | "
-            f"Availability rows: {availability_count} | Can-teach rows: {teach_count}"
-        )
-
-    def _safe_count(self, cur, query):
-        try:
-            cur.execute(query)
-            row = cur.fetchone()
-            return row[0] if row else 0
-        except sqlite3.Error:
-            return 0
-
-    def run_solver(self):
-        if not self.solver_path.exists():
-            QMessageBox.warning(self, "Missing File", f"Could not find {self.solver_path.name}")
-            return
-        if not self.db_path.exists():
-            QMessageBox.warning(self, "Missing File", f"Could not find database: {self.db_path}")
-            return
-
-        completed = self.run_command([sys.executable, str(self.solver_path)], self.project_dir)
-        if completed is None:
-            return
-
-        if completed.returncode == 0:
-            self.log("Solver run finished.")
-            self.parse_schedule_output(completed.stdout)
-
-    def parse_schedule_output(self, stdout_text):
-        lines = stdout_text.splitlines()
-        rows = []
-        capture = False
-
-        for line in lines:
-            stripped = line.strip()
-            if stripped == "Schedule:":
-                capture = True
-                continue
-            if not capture or not stripped:
-                continue
-            if stripped.startswith("Section"):
-                continue
-
-            parts = [p.strip() for p in line.split("\t")]
-            if len(parts) >= 5:
-                rows.append(parts[:5])
-
+        rows = parse_solver_output(result.stdout)
         if not rows:
-            self.log("No printable schedule table found in solver output.")
+            self._log("Solver finished but no schedule found.")
             return
-
-        self.all_headers = ["Section", "Type", "Days", "Time", "Professor"]
         self.all_rows = rows
         self.apply_filters()
 
@@ -397,9 +577,7 @@ class SchedulerWindow(QMainWindow):
 
     def update_gantt_chart(self, rows):
         if not rows:
-            empty_msg = "<html><body><h3>No data matches your filters.</h3></body></html>"
-            self.web_view.setHtml(empty_msg)
-            self.prof_web_view.setHtml(empty_msg)
+            self.web_view.setHtml("<html><body><h3>No data matches your filters.</h3></body></html>")
             return
 
         df_data = []
@@ -412,58 +590,64 @@ class SchedulerWindow(QMainWindow):
         }
 
         for row in rows:
-            if len(row) < 5: continue
+            if len(row) < 5:
+                continue
+            
             section, type_, days, time_str, prof = row
+            
             try:
                 start_str, end_str = time_str.split('-')
-            except ValueError: continue
+            except ValueError:
+                continue
 
             for day_char in days:
                 if day_char in day_map:
                     day_name, date_str = day_map[day_char]
+                    start_dt = f"{date_str} {start_str}:00"
+                    end_dt = f"{date_str} {end_str}:00"
+
                     df_data.append({
                         "Section": section,
                         "Professor": prof,
+                        "Type": type_.capitalize(),
                         "Day": day_name,
-                        "Start": f"{date_str} {start_str}:00",
-                        "Finish": f"{date_str} {end_str}:00"
+                        "Start": start_dt,
+                        "Finish": end_dt
                     })
 
         if not df_data:
+            self.web_view.setHtml("<html><body><h3>Could not parse times for Gantt chart.</h3></body></html>")
             return
 
         df = pd.DataFrame(df_data)
+        
         day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
         df['Day'] = pd.Categorical(df['Day'], categories=day_order, ordered=True)
+        df = df.sort_values(['Day', 'Start'])
 
-        # --- VIEW 1: Original (Color by Day, Y=Section) ---
-        df_sec = df.sort_values(['Day', 'Start'])
-        fig_sec = px.timeline(
-            df_sec, x_start="Start", x_end="Finish", y="Section",
-            color="Day", text="Professor", title="Schedule (Keyed by Day)"
+        # Build Plotly Figure
+        fig = px.timeline(
+            df,
+            x_start="Start",
+            x_end="Finish",
+            y="Day",
+            color="Professor",
+            hover_name="Section",
+            text="Section",
+            title="Weekly Class Schedule"
         )
-        self._style_chart(fig_sec)
-        self.web_view.setHtml(fig_sec.to_html(include_plotlyjs='cdn'))
-
-        # --- VIEW 2: Professor Step Ladder (Color by Professor, Y=Section) ---
-        # We sort by Professor first to create the ladder effect for each instructor
-        df_prof = df.sort_values(['Professor', 'Day', 'Start'])
-        fig_prof = px.timeline(
-            df_prof, x_start="Start", x_end="Finish", y="Section",
-            color="Professor", text="Day", title="Schedule (Keyed by Professor)"
-        )
-        self._style_chart(fig_prof)
-        self.prof_web_view.setHtml(fig_prof.to_html(include_plotlyjs='cdn'))
-
-    def _style_chart(self, fig):
-        """Helper to keep charts looking consistent"""
-        fig.update_traces(textangle=0, textposition="inside")
+        
         fig.update_yaxes(autorange="reversed")
         fig.update_layout(
             xaxis=dict(tickformat="%H:%M", title="Time"),
             yaxis=dict(title=""),
-            margin=dict(l=20, r=20, t=40, b=20)
+            hovermode="closest",
+            margin=dict(l=20, r=20, t=40, b=20) # Tighten margins for the embedded view
         )
+        
+        # Convert to HTML and inject into QWebEngineView
+        raw_html = fig.to_html(include_plotlyjs='cdn')
+        self.web_view.setHtml(raw_html)
 
 
 def main():
