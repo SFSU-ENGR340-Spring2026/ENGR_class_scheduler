@@ -177,12 +177,19 @@ class SchedulerWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.tabs.addTab(self.table, "Table View")
 
-        # Tab 2: Gantt Chart (Embedded Web View)
+        # Tab 2: Step Ladder (Embedded Web View)
         self.web_view = QWebEngineView()
-        self.tabs.addTab(self.web_view, "Gantt Chart")
+        self.tabs.addTab(self.web_view, "Weekly Schedule (Gantt)")
+        
+        # Tab 3: Professor Step Ladder (Embedded Web View)
+        self.prof_web_view = QWebEngineView()
+        self.tabs.addTab(self.prof_web_view, "Professor Schedule (Gantt)")
+
+        # Tab 4: Classes Step Ladder (Embedded Web View)
+        self.classes_web_view = QWebEngineView()
+        self.tabs.addTab(self.classes_web_view, "Classes Schedule (Gantt)")
 
         layout.addWidget(self.tabs)
-
         return panel
 
     def refresh_paths(self):
@@ -390,7 +397,9 @@ class SchedulerWindow(QMainWindow):
 
     def update_gantt_chart(self, rows):
         if not rows:
-            self.web_view.setHtml("<html><body><h3>No data matches your filters.</h3></body></html>")
+            empty_msg = "<html><body><h3>No data matches your filters.</h3></body></html>"
+            self.web_view.setHtml(empty_msg)
+            self.prof_web_view.setHtml(empty_msg)
             return
 
         df_data = []
@@ -403,64 +412,58 @@ class SchedulerWindow(QMainWindow):
         }
 
         for row in rows:
-            if len(row) < 5:
-                continue
-            
+            if len(row) < 5: continue
             section, type_, days, time_str, prof = row
-            
             try:
                 start_str, end_str = time_str.split('-')
-            except ValueError:
-                continue
+            except ValueError: continue
 
             for day_char in days:
                 if day_char in day_map:
                     day_name, date_str = day_map[day_char]
-                    start_dt = f"{date_str} {start_str}:00"
-                    end_dt = f"{date_str} {end_str}:00"
-
                     df_data.append({
                         "Section": section,
                         "Professor": prof,
-                        "Type": type_.capitalize(),
                         "Day": day_name,
-                        "Start": start_dt,
-                        "Finish": end_dt
+                        "Start": f"{date_str} {start_str}:00",
+                        "Finish": f"{date_str} {end_str}:00"
                     })
 
         if not df_data:
-            self.web_view.setHtml("<html><body><h3>Could not parse times for Gantt chart.</h3></body></html>")
             return
 
         df = pd.DataFrame(df_data)
-        
         day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
         df['Day'] = pd.Categorical(df['Day'], categories=day_order, ordered=True)
-        df = df.sort_values(['Day', 'Start'])
 
-        # Build Plotly Figure
-        fig = px.timeline(
-            df,
-            x_start="Start",
-            x_end="Finish",
-            y="Day",
-            color="Professor",
-            hover_name="Section",
-            text="Section",
-            title="Weekly Class Schedule"
+        # --- VIEW 1: Original (Color by Day, Y=Section) ---
+        df_sec = df.sort_values(['Day', 'Start'])
+        fig_sec = px.timeline(
+            df_sec, x_start="Start", x_end="Finish", y="Section",
+            color="Day", text="Professor", title="Schedule (Keyed by Day)"
         )
-        
+        self._style_chart(fig_sec)
+        self.web_view.setHtml(fig_sec.to_html(include_plotlyjs='cdn'))
+
+        # --- VIEW 2: Professor Step Ladder (Color by Professor, Y=Section) ---
+        # We sort by Professor first to create the ladder effect for each instructor
+        df_prof = df.sort_values(['Professor', 'Day', 'Start'])
+        fig_prof = px.timeline(
+            df_prof, x_start="Start", x_end="Finish", y="Section",
+            color="Professor", text="Day", title="Schedule (Keyed by Professor)"
+        )
+        self._style_chart(fig_prof)
+        self.prof_web_view.setHtml(fig_prof.to_html(include_plotlyjs='cdn'))
+
+    def _style_chart(self, fig):
+        """Helper to keep charts looking consistent"""
+        fig.update_traces(textangle=0, textposition="inside")
         fig.update_yaxes(autorange="reversed")
         fig.update_layout(
             xaxis=dict(tickformat="%H:%M", title="Time"),
             yaxis=dict(title=""),
-            hovermode="closest",
-            margin=dict(l=20, r=20, t=40, b=20) # Tighten margins for the embedded view
+            margin=dict(l=20, r=20, t=40, b=20)
         )
-        
-        # Convert to HTML and inject into QWebEngineView
-        raw_html = fig.to_html(include_plotlyjs='cdn')
-        self.web_view.setHtml(raw_html)
 
 
 def main():
