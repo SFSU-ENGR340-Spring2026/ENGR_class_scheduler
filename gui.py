@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QTabWidget,
@@ -478,8 +479,8 @@ class SchedulerWindow(QMainWindow):
         self.tabs.addTab(self.table, "Table View")
 
         self.web_view = QWebEngineView()
-        self.result_tabs.addTab(self.web_view, "Gantt Chart")
-        layout.addWidget(self.result_tabs)
+        self.tabs.addTab(self.web_view, "Gantt Chart")
+        layout.addWidget(self.tabs)
 
         return panel
 
