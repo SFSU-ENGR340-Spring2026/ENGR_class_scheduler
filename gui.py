@@ -422,23 +422,17 @@ class SchedulerWindow(QMainWindow):
         filter_row.addWidget(self.filter_day)
         layout.addLayout(filter_row)
 
-        # Create Tab Widget for Table vs Gantt views
-        self.tabs = QTabWidget()
-
-        # Tab 1: Table
-        self.table = QTableWidget()
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSortingEnabled(True)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.tabs.addTab(self.table, "Table View")
-
-        # Tab 2: Gantt Chart (Embedded Web View)
+        # results: table view + Gantt chart
+        self.result_tabs = QTabWidget()
+        self.result_table = QTableWidget()
+        self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.result_table.setSortingEnabled(True)
+        self.result_table.horizontalHeader().setStretchLastSection(True)
+        self.result_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.result_tabs.addTab(self.result_table, "Table View")
         self.web_view = QWebEngineView()
-        self.tabs.addTab(self.web_view, "Gantt Chart")
-
-        layout.addWidget(self.tabs)
+        self.result_tabs.addTab(self.web_view, "Gantt Chart")
+        layout.addWidget(self.result_tabs)
 
         return panel
 
@@ -499,160 +493,46 @@ class SchedulerWindow(QMainWindow):
         rows = [[sec, typ, days, time, prof] for sec, typ, days, time, prof in result]
         rows.sort(key=lambda r: (r[0], r[3]))
         self.all_rows = rows
-        self.apply_filters()
+        self._apply_filters()
+        self._log(f"Solved: {len(rows)} sections scheduled.")
 
-    def load_schedule_preview(self):
-        if not self.db_path.exists():
-            self.all_headers = []
-            self.all_rows = []
-            self.table.clear()
-            self.table.setRowCount(0)
-            self.table.setColumnCount(0)
-            self.web_view.setHtml("<html><body><h3>No schedule loaded.</h3></body></html>")
-            self.summary_label.setText("No preview available.")
+    def _apply_filters(self):
+        if not self.all_rows:
             return
+        f_sec  = self.filter_section.text().strip().lower()
+        f_type = self.filter_type.text().strip().lower()
+        f_day  = self.filter_day.text().strip().lower()
+        f_prof = self.filter_prof.text().strip().lower()
 
-        self.all_headers = ["Section", "Type", "Days", "Time", "Professor"]
-        self.all_rows = []
-        self.table.clear()
-        self.table.setRowCount(0)
-        self.table.setColumnCount(len(self.all_headers))
-        self.table.setHorizontalHeaderLabels(self.all_headers)
-        self.web_view.setHtml("<html><body><h3>Run the solver to view Gantt chart.</h3></body></html>")
-        self.summary_label.setText("Run the solver to load the current schedule preview.")
+        filtered = []
+        for row in self.all_rows:
+            r = (row + [""] * 5)[:5]
+            if f_sec  and f_sec  not in r[0].lower(): continue
+            if f_type and f_type not in r[1].lower(): continue
+            if f_day  and f_day  not in r[2].lower(): continue
+            if f_prof and f_prof not in r[4].lower(): continue
+            filtered.append(r)
 
-    def open_project_folder(self):
-        try:
-            subprocess.run(["open", str(self.project_dir)], check=False)
-        except Exception as exc:
-            QMessageBox.warning(self, "Open Folder", f"Could not open folder:\n{exc}")
+        headers = ["Section", "Type", "Days", "Time", "Professor"]
+        self.result_table.setSortingEnabled(False)
+        self.result_table.clear()
+        self.result_table.setColumnCount(len(headers))
+        self.result_table.setHorizontalHeaderLabels(headers)
+        self.result_table.setRowCount(len(filtered))
+        for r_idx, row in enumerate(filtered):
+            for c_idx, val in enumerate(row):
+                self.result_table.setItem(r_idx, c_idx, QTableWidgetItem(val))
+        self.result_table.setSortingEnabled(True)
+        self.summary_label.setText(f"Showing {len(filtered)} of {len(self.all_rows)} scheduled sections")
+        self.web_view.setHtml(build_gantt_html(filtered))
 
-    def apply_filters(self):
-        headers = self.all_headers
-        rows = self.all_rows
-        if not headers:
-            return
+    def _log(self, message):
+        self.log_box.appendPlainText(message)
 
-        section_text = self.section_filter_edit.text().strip().lower()
-        type_text = self.type_filter_edit.text().strip().lower()
-        prof_text = self.prof_filter_edit.text().strip().lower()
-        day_text = self.day_filter_edit.text().strip().lower()
 
-        filtered_rows = []
-        for row in rows:
-            row_extended = row + [""] * max(0, len(headers) - len(row))
-            section_value = row_extended[0].lower()
-            type_value = row_extended[1].lower()
-            day_value = row_extended[2].lower()
-            prof_value = row_extended[4].lower()
-
-            if section_text and section_text not in section_value:
-                continue
-            if type_text and type_text not in type_value:
-                continue
-            if prof_text and prof_text not in prof_value:
-                continue
-            if day_text and day_text not in day_value:
-                continue
-            filtered_rows.append(row_extended)
-
-        # Update Table
-        self.table.setSortingEnabled(False)
-        self.table.clear()
-        self.table.setColumnCount(len(headers))
-        self.table.setHorizontalHeaderLabels(headers)
-        self.table.setRowCount(len(filtered_rows))
-
-        for r, row in enumerate(filtered_rows):
-            type_value = row[1].strip().lower() if len(row) > 1 else ""
-            for c, value in enumerate(row[:len(headers)]):
-                item = QTableWidgetItem(value)
-                if type_value == "lab":
-                    item.setBackground(QColor(235, 245, 255))
-                elif type_value == "activity":
-                    item.setBackground(QColor(240, 255, 240))
-                self.table.setItem(r, c, item)
-
-        self.table.setSortingEnabled(True)
-        self.summary_label.setText(f"Showing {len(filtered_rows)} of {len(rows)} scheduled rows")
-        
-        # Update Gantt Chart
-        self.update_gantt_chart(filtered_rows)
-
-    def update_gantt_chart(self, rows):
-        if not rows:
-            self.web_view.setHtml("<html><body><h3>No data matches your filters.</h3></body></html>")
-            return
-
-        df_data = []
-        day_map = {
-            'M': ('Monday', '2024-01-01'), 
-            'T': ('Tuesday', '2024-01-02'), 
-            'W': ('Wednesday', '2024-01-03'), 
-            'R': ('Thursday', '2024-01-04'), 
-            'F': ('Friday', '2024-01-05')
-        }
-
-        for row in rows:
-            if len(row) < 5:
-                continue
-            
-            section, type_, days, time_str, prof = row
-            
-            try:
-                start_str, end_str = time_str.split('-')
-            except ValueError:
-                continue
-
-            for day_char in days:
-                if day_char in day_map:
-                    day_name, date_str = day_map[day_char]
-                    start_dt = f"{date_str} {start_str}:00"
-                    end_dt = f"{date_str} {end_str}:00"
-
-                    df_data.append({
-                        "Section": section,
-                        "Professor": prof,
-                        "Type": type_.capitalize(),
-                        "Day": day_name,
-                        "Start": start_dt,
-                        "Finish": end_dt
-                    })
-
-        if not df_data:
-            self.web_view.setHtml("<html><body><h3>Could not parse times for Gantt chart.</h3></body></html>")
-            return
-
-        df = pd.DataFrame(df_data)
-        
-        day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-        df['Day'] = pd.Categorical(df['Day'], categories=day_order, ordered=True)
-        df = df.sort_values(['Day', 'Start'])
-
-        # Build Plotly Figure
-        fig = px.timeline(
-            df,
-            x_start="Start",
-            x_end="Finish",
-            y="Day",
-            color="Professor",
-            hover_name="Section",
-            text="Section",
-            title="Weekly Class Schedule"
-        )
-        
-        fig.update_yaxes(autorange="reversed")
-        fig.update_layout(
-            xaxis=dict(tickformat="%H:%M", title="Time"),
-            yaxis=dict(title=""),
-            hovermode="closest",
-            margin=dict(l=20, r=20, t=40, b=20) # Tighten margins for the embedded view
-        )
-        
-        # Convert to HTML and inject into QWebEngineView
-        raw_html = fig.to_html(include_plotlyjs='cdn')
-        self.web_view.setHtml(raw_html)
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main():
     app = QApplication(sys.argv)
