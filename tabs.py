@@ -79,28 +79,33 @@ class SectionsTab(QWidget):
 
         short = sid.split("-")[-1] if "-" in sid else ""
 
-        item0 = QTableWidgetItem(short)
-        item1 = QTableWidgetItem(cid)
-        item2 = QTableWidgetItem(ctype)
-        item3 = QTableWidgetItem(stype)
-        item4 = QTableWidgetItem(str(cap))
+        self.table.setItem(r, 0, QTableWidgetItem(short))
+        self.table.setItem(r, 1, QTableWidgetItem(cid))
+        self.table.setItem(r, 2, QTableWidgetItem(ctype))
+        self.table.setItem(r, 3, QTableWidgetItem(stype))
+        self.table.setItem(r, 4, QTableWidgetItem(str(cap)))
+        self.table.setCellWidget(r, 5, self._make_delete_btn(r))
 
-        self.table.setItem(r, 0, item0)
-        self.table.setItem(r, 1, item1)
-        self.table.setItem(r, 2, item2)
-        self.table.setItem(r, 3, item3)
-        self.table.setItem(r, 4, item4)
-
-        del_btn = QPushButton("×")
-        del_btn.setFixedSize(28, 22)
-        del_btn.setStyleSheet("color:red; font-weight:bold;")
-        del_btn.clicked.connect(lambda _, row=r: self._delete_row(row))
+    def _make_delete_btn(self, row):
+        """Return a centred × button wired to delete the given row."""
+        btn = QPushButton("×")
+        btn.setFixedSize(28, 22)
+        btn.setStyleSheet("color:red; font-weight:bold;")
+        btn.clicked.connect(lambda _, b=btn: self._delete_row_by_btn(b))
         container = QWidget()
         cl = QHBoxLayout(container)
-        cl.addWidget(del_btn)
+        cl.addWidget(btn)
         cl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cl.setContentsMargins(0, 0, 0, 0)
-        self.table.setCellWidget(r, 5, container)
+        return container
+
+    def _delete_row_by_btn(self, btn):
+        """Find the row that owns this button and delete it."""
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, 5)
+            if w and w.findChild(QPushButton) is btn:
+                self._delete_row(r)
+                return
 
     def _add_row(self):
         self._insert_row()
@@ -115,14 +120,6 @@ class SectionsTab(QWidget):
                 return
             delete_section(self.db_path, sid)
         self.table.removeRow(row)
-        # reconnect all delete buttons so row indices stay correct
-        for r in range(self.table.rowCount()):
-            w = self.table.cellWidget(r, 5)
-            if w:
-                btn = w.findChild(QPushButton)
-                if btn:
-                    btn.clicked.disconnect()
-                    btn.clicked.connect(lambda _, row=r: self._delete_row(row))
 
     def save(self):
         rows = []
@@ -147,19 +144,20 @@ class FacultyTab(QWidget):
     def __init__(self, db_path):
         super().__init__()
         self.db_path = db_path
-        self._fac_codes = []  # stores faculty_code for each row so we can save/delete correctly
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        hint = QLabel("Can Teach: comma-separated course IDs  |  Check a day to mark availability")
+        hint = QLabel("Code: unique faculty ID  |  Can Teach: comma-separated course IDs  |  Check a day to mark availability")
         hint.setStyleSheet("color:#666; font-size:11px;")
         layout.addWidget(hint)
 
-        # columns: Name, Can Teach, M, T, W, R, F, ×
-        self.table = QTableWidget(0, 8)
+        # columns: Code, Name, Can Teach, M, T, W, R, F, ×
+        # NOTE: _fac_codes has been removed. The Code column (col 0) is the
+        # single source of truth for faculty_code, for both existing and new rows.
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels([
-            "Name", "Can Teach",
+            "Code", "Name", "Can Teach",
             f"M\n{AVAIL_START}-{AVAIL_END}",
             f"T\n{AVAIL_START}-{AVAIL_END}",
             f"W\n{AVAIL_START}-{AVAIL_END}",
@@ -171,21 +169,23 @@ class FacultyTab(QWidget):
         self.table.setWordWrap(True)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 200)
-        self.table.setColumnWidth(2, 72)
+        hdr.setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(0, 80)
+        self.table.setColumnWidth(2, 200)
         self.table.setColumnWidth(3, 72)
         self.table.setColumnWidth(4, 72)
         self.table.setColumnWidth(5, 72)
         self.table.setColumnWidth(6, 72)
-        self.table.setColumnWidth(7, 32)
+        self.table.setColumnWidth(7, 72)
+        self.table.setColumnWidth(8, 32)
         hdr.setMinimumHeight(36)
         layout.addWidget(self.table)
 
@@ -197,7 +197,6 @@ class FacultyTab(QWidget):
 
     def load(self):
         self.table.setRowCount(0)
-        self._fac_codes = []
         for code, name, courses, avail_dict in load_faculty(self.db_path):
             self._insert_row(code, name, courses, avail_dict)
 
@@ -206,15 +205,15 @@ class FacultyTab(QWidget):
             avail_dict = {}
         r = self.table.rowCount()
         self.table.insertRow(r)
-        self._fac_codes.append(code)
 
-        self.table.setItem(r, 0, QTableWidgetItem(name))
+        self.table.setItem(r, 0, QTableWidgetItem(code))
+        self.table.setItem(r, 1, QTableWidgetItem(name))
         teach_item = QTableWidgetItem(courses)
         teach_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.table.setItem(r, 1, teach_item)
+        self.table.setItem(r, 2, teach_item)
 
-        # one checkbox per day column (cols 2-6)
-        for col, day in enumerate(DAY_ORDER, start=2):
+        # one checkbox per day column (cols 3-7)
+        for col, day in enumerate(DAY_ORDER, start=3):
             cb = QCheckBox()
             cb.setChecked(day in avail_dict)
             container = QWidget()
@@ -225,54 +224,68 @@ class FacultyTab(QWidget):
             self.table.setCellWidget(r, col, container)
         self.table.setRowHeight(r, 24)
 
-        del_btn = QPushButton("×")
-        del_btn.setFixedSize(28, 22)
-        del_btn.setStyleSheet("color:red; font-weight:bold;")
-        del_btn.clicked.connect(lambda _, row=r: self._delete_row(row))
+        self.table.setCellWidget(r, 8, self._make_delete_btn(r))
+
+    def _make_delete_btn(self, row):
+        btn = QPushButton("×")
+        btn.setFixedSize(28, 22)
+        btn.setStyleSheet("color:red; font-weight:bold;")
+        btn.clicked.connect(lambda _, b=btn: self._delete_row_by_btn(b))
         container = QWidget()
         cl = QHBoxLayout(container)
-        cl.addWidget(del_btn)
+        cl.addWidget(btn)
         cl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cl.setContentsMargins(0, 0, 0, 0)
-        self.table.setCellWidget(r, 7, container)
+        return container
+
+    def _delete_row_by_btn(self, btn):
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, 8)
+            if w and w.findChild(QPushButton) is btn:
+                self._delete_row(r)
+                return
 
     def _add_row(self):
         self._insert_row()
 
     def _delete_row(self, row):
-        code = self._fac_codes[row] if row < len(self._fac_codes) else ""
-        name = self.table.item(row, 0).text() if self.table.item(row, 0) else code
+        code = self.table.item(row, 0).text().strip() if self.table.item(row, 0) else ""
+        name = self.table.item(row, 1).text().strip() if self.table.item(row, 1) else code
         if code:
-            reply = QMessageBox.question(self, "Delete", f"Delete {name}?")
+            reply = QMessageBox.question(self, "Delete", f"Delete {name} ({code})?")
             if reply != QMessageBox.StandardButton.Yes:
                 return
             delete_faculty(self.db_path, code)
         self.table.removeRow(row)
-        if row < len(self._fac_codes):
-            self._fac_codes.pop(row)
-        # reconnect all delete buttons so row indices stay correct
-        for r in range(self.table.rowCount()):
-            w = self.table.cellWidget(r, 7)
-            if w:
-                btn = w.findChild(QPushButton)
-                if btn:
-                    btn.clicked.disconnect()
-                    btn.clicked.connect(lambda _, row=r: self._delete_row(row))
 
     def save(self):
+        errors = []
+        seen_codes = set()
         rows = []
         for r in range(self.table.rowCount()):
-            code  = self._fac_codes[r] if r < len(self._fac_codes) else ""
-            name  = self.table.item(r, 0).text() if self.table.item(r, 0) else ""
-            teach = self.table.item(r, 1).text() if self.table.item(r, 1) else ""
+            code  = self.table.item(r, 0).text().strip() if self.table.item(r, 0) else ""
+            name  = self.table.item(r, 1).text().strip() if self.table.item(r, 1) else ""
+            teach = self.table.item(r, 2).text().strip() if self.table.item(r, 2) else ""
+            if not code:
+                errors.append(f"Row {r + 1}: Code is required.")
+                continue
+            if code in seen_codes:
+                errors.append(f"Row {r + 1}: Duplicate code '{code}'.")
+                continue
+            seen_codes.add(code)
             avail = {}
-            for col, day in enumerate(DAY_ORDER, start=2):
+            for col, day in enumerate(DAY_ORDER, start=3):
                 w = self.table.cellWidget(r, col)
                 if w:
                     cb = w.findChild(QCheckBox)
                     if cb and cb.isChecked():
                         avail[day] = (AVAIL_START, AVAIL_END)
             rows.append((code, name, teach, avail))
+
+        if errors:
+            QMessageBox.warning(self, "Save Errors", "\n".join(errors))
+            return
+
         save_faculty(self.db_path, rows)
 
 
@@ -324,28 +337,31 @@ class TimeSlotsTab(QWidget):
         r = self.table.rowCount()
         self.table.insertRow(r)
 
-        item0 = QTableWidgetItem(slot_id)
-        item1 = QTableWidgetItem(stype)
-        item2 = QTableWidgetItem(pattern)
-        item3 = QTableWidgetItem(start)
-        item4 = QTableWidgetItem(end)
+        self.table.setItem(r, 0, QTableWidgetItem(slot_id))
+        self.table.setItem(r, 1, QTableWidgetItem(stype))
+        self.table.setItem(r, 2, QTableWidgetItem(pattern))
+        self.table.setItem(r, 3, QTableWidgetItem(start))
+        self.table.setItem(r, 4, QTableWidgetItem(end))
+        self.table.setCellWidget(r, 5, self._make_delete_btn(r))
 
-        self.table.setItem(r, 0, item0)
-        self.table.setItem(r, 1, item1)
-        self.table.setItem(r, 2, item2)
-        self.table.setItem(r, 3, item3)
-        self.table.setItem(r, 4, item4)
-
-        del_btn = QPushButton("×")
-        del_btn.setFixedSize(28, 22)
-        del_btn.setStyleSheet("color:red; font-weight:bold;")
-        del_btn.clicked.connect(lambda _, row=r: self._delete_row(row))
+    def _make_delete_btn(self, row):
+        btn = QPushButton("×")
+        btn.setFixedSize(28, 22)
+        btn.setStyleSheet("color:red; font-weight:bold;")
+        btn.clicked.connect(lambda _, b=btn: self._delete_row_by_btn(b))
         container = QWidget()
         cl = QHBoxLayout(container)
-        cl.addWidget(del_btn)
+        cl.addWidget(btn)
         cl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cl.setContentsMargins(0, 0, 0, 0)
-        self.table.setCellWidget(r, 5, container)
+        return container
+
+    def _delete_row_by_btn(self, btn):
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, 5)
+            if w and w.findChild(QPushButton) is btn:
+                self._delete_row(r)
+                return
 
     def _add_row(self):
         self._insert_row()
@@ -358,14 +374,6 @@ class TimeSlotsTab(QWidget):
                 return
             delete_time_slot(self.db_path, slot_id)
         self.table.removeRow(row)
-        # reconnect all delete buttons so row indices stay correct
-        for r in range(self.table.rowCount()):
-            w = self.table.cellWidget(r, 5)
-            if w:
-                btn = w.findChild(QPushButton)
-                if btn:
-                    btn.clicked.disconnect()
-                    btn.clicked.connect(lambda _, row=r: self._delete_row(row))
 
     def save(self):
         rows = []
@@ -377,3 +385,6 @@ class TimeSlotsTab(QWidget):
             end     = self.table.item(r, 4).text() if self.table.item(r, 4) else ""
             rows.append([slot_id, stype, pattern, start, end])
         save_time_slots(self.db_path, rows)
+        # Reload so newly inserted rows get their real DB-assigned IDs,
+        # preventing duplicate inserts on a subsequent save.
+        self.load()

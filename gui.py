@@ -5,6 +5,7 @@ Tab classes live in tabs.py. DB functions live in db.py.
 """
 
 import platform
+import shutil
 import subprocess
 import sys
 from collections import defaultdict
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from tabs import SectionsTab, FacultyTab, TimeSlotsTab
+from solver import Scheduler
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -70,38 +72,24 @@ def open_folder(path):
         subprocess.run(["xdg-open", str(path)], check=False)
 
 
-def parse_solver_output(text):
-    # read each line of solver output and collect the schedule rows
-    rows = []
-    capturing = False
-    for line in text.splitlines():
-        s = line.strip()
-        if s == "Schedule:":
-            capturing = True
-            continue
-        if not capturing or not s or s.startswith("Section"):
-            continue
-        parts = [p.strip() for p in line.split("\t")]
-        if len(parts) >= 5:
-            rows.append(parts[:5])
-    return rows
-
-
 # ---------------------------------------------------------------------------
 # Gantt chart
 # ---------------------------------------------------------------------------
 
 def assign_lanes(bars):
-    # sort bars by start time so we process them in order
+    """Assign non-overlapping horizontal lanes to a list of time bars.
+    Returns the same list, each bar augmented with lane_idx and total_lanes.
+    Safe to call with an empty list.
+    """
+    if not bars:
+        return bars
     bars.sort(key=lambda b: (b["s"], b["e"]))
     lane_of = [-1] * len(bars)
     for i in range(len(bars)):
-        # find which lanes are already taken by overlapping earlier bars
         used = set()
         for j in range(i):
             if bars[j]["s"] < bars[i]["e"] and bars[j]["e"] > bars[i]["s"]:
                 used.add(lane_of[j])
-        # assign the lowest available lane
         lane = 0
         while lane in used:
             lane += 1
@@ -130,9 +118,7 @@ def build_gantt_html(rows):
 
     # assign a color to each professor
     all_profs = sorted({r[4] for r in rows if len(r) >= 5})
-    prof_color = {}
-    for i, p in enumerate(all_profs):
-        prof_color[p] = PALETTE[i % len(PALETTE)]
+    prof_color = {p: PALETTE[i % len(PALETTE)] for i, p in enumerate(all_profs)}
 
     # parse each schedule row into a bar dict, grouped by day
     bars_by_day = [[], [], [], [], []]
@@ -155,23 +141,31 @@ def build_gantt_html(rows):
     # assign non-overlapping lanes per day, then flatten into one list
     all_bars = []
     for d in range(5):
-        if bars_by_day[d]:
-            for bar in assign_lanes(bars_by_day[d]):
-                bar["d"] = d
-                all_bars.append(bar)
+        for bar in assign_lanes(bars_by_day[d]):
+            bar["d"] = d
+            all_bars.append(bar)
 
     fig = go.Figure()
+
+    # derive Y-axis range from actual data; fall back to 8am-10pm if empty
+    if all_bars:
+        y_min = min(b["s"] for b in all_bars)
+        y_max = max(b["e"] for b in all_bars)
+        y_min = max(0,    (y_min // 60) * 60 - 30)   # floor to prev hour - 30 min padding
+        y_max = min(1440, (y_max // 60) * 60 + 90)   # ceil  to next hour + 30 min padding
+    else:
+        y_min, y_max = 480, 1320
 
     # draw alternating column backgrounds and divider lines
     shapes = []
     bg_colors = ["#f5f5f5", "#ffffff", "#f5f5f5", "#ffffff", "#f5f5f5"]
     for d in range(5):
         shapes.append(dict(type="rect", x0=day_x(d), x1=day_x(d) + DAY_WIDTH,
-                           y0=480, y1=1320, fillcolor=bg_colors[d],
+                           y0=y_min, y1=y_max, fillcolor=bg_colors[d],
                            opacity=1.0, line=dict(width=0), layer="below"))
     for d in range(1, 5):
         shapes.append(dict(type="line", x0=day_x(d) - DAY_GAP / 2, x1=day_x(d) - DAY_GAP / 2,
-                           y0=480, y1=1320, line=dict(color="#bbbbbb", width=2), layer="below"))
+                           y0=y_min, y1=y_max, line=dict(color="#bbbbbb", width=2), layer="below"))
 
     # draw one Scatter trace per professor so legend click shows/hides their bars
     bars_by_prof = defaultdict(list)
@@ -223,7 +217,7 @@ def build_gantt_html(rows):
         ))
 
     # configure axes and layout
-    y_vals = list(range(480, 1321, 60))
+    y_vals = list(range(y_min, y_max + 1, 60))
     y_text = [f"{v // 60:02d}:00" for v in y_vals]
     x_ticks = [day_x(d) + DAY_WIDTH / 2 for d in range(5)]
 
@@ -238,7 +232,7 @@ def build_gantt_html(rows):
         ),
         yaxis=dict(
             tickmode="array", tickvals=y_vals, ticktext=y_text,
-            autorange="reversed", range=[480, 1320], title="Time",
+            autorange="reversed", range=[y_min, y_max], title="Time",
             gridcolor="#e0e0e0", zeroline=False, fixedrange=False,
         ),
         dragmode="zoom",
@@ -320,10 +314,21 @@ class SchedulerWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("ENGR Class Scheduler")
         self.resize(1400, 860)
-        self.project_dir = Path.cwd()
-        self.solver_path = self.project_dir / "solver.py"
-        self.db_path     = self.project_dir / "db_classes.db"
-        self.all_rows    = []
+        if getattr(sys, "frozen", False):
+            # Inside a .app: Contents/MacOS/ENGR_Scheduler → 4 parents up = dist/
+            self.project_dir = Path(sys.executable).parent.parent.parent.parent
+        else:
+            self.project_dir = Path.cwd()
+        self.db_path = self.project_dir / "db_classes.db"
+
+        # On first launch of the frozen .app, copy the bundled DB to the
+        # writable project folder so the user can actually read/write it.
+        if not self.db_path.exists() and getattr(sys, "frozen", False):
+            bundled = Path(sys._MEIPASS) / "db_classes.db"
+            if bundled.exists():
+                shutil.copy(bundled, self.db_path)
+
+        self.all_rows = []
         self._build_ui()
         self._refresh_paths()
 
@@ -438,8 +443,7 @@ class SchedulerWindow(QMainWindow):
         return panel
 
     def _refresh_paths(self):
-        self.solver_path = self.project_dir / "solver.py"
-        self.db_path     = self.project_dir / "db_classes.db"
+        self.db_path = self.project_dir / "db_classes.db"
         self.project_dir_edit.setText(str(self.project_dir))
         if self.db_path.exists():
             self._sections_tab.db_path = self.db_path
@@ -470,30 +474,30 @@ class SchedulerWindow(QMainWindow):
             self._log(f"Save error: {e}")
 
     def _run_solver(self):
-        if not self.solver_path.exists():
-            self._log("solver.py not found.")
-            return
         if not self.db_path.exists():
             self._log("Database not found.")
             return
-        self._log("Running solver…")
+        # Save any pending edits first so the solver always sees current data.
         try:
-            result = subprocess.run(
-                [sys.executable, str(self.solver_path)],
-                cwd=str(self.project_dir),
-                capture_output=True,
-                text=True,
-            )
+            self._sections_tab.save()
+            self._faculty_tab.save()
+            self._slots_tab.save()
         except Exception as e:
-            self._log(f"Error: {e}")
+            self._log(f"Save error before solving: {e}")
             return
-        if result.returncode != 0:
-            self._log(f"Solver failed.\n{result.stderr.strip()}")
+        self._log("Saved edits. Running solver…")
+        try:
+            sched = Scheduler(str(self.db_path))
+            sched.load()
+            result = sched.solve()
+        except Exception as e:
+            self._log(f"Solver error: {e}")
             return
-        rows = parse_solver_output(result.stdout)
-        if not rows:
-            self._log("Solver finished but no schedule found.")
+        if not result:
+            self._log("Solver finished but no feasible schedule found.")
             return
+        rows = [[sec, typ, days, time, prof] for sec, typ, days, time, prof in result]
+        rows.sort(key=lambda r: (r[0], r[3]))
         self.all_rows = rows
         self.apply_filters()
 
