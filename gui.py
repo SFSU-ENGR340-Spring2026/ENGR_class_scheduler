@@ -49,7 +49,7 @@ PALETTE = [
 ]
 DAY_ORDER  = ["M", "T", "W", "R", "F"]
 DAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-DAY_WIDTH  = 1.8
+DAY_SPAN  = 1.8
 DAY_GAP    = 0.4
 BAR_PAD    = 0.015
 
@@ -101,14 +101,14 @@ def assign_lanes(bars):
     return bars
 
 
-def day_x(d):
-    return d * (DAY_WIDTH + DAY_GAP)
+def day_pos(d):
+    return d * (DAY_SPAN + DAY_GAP)
 
 
 def bar_coords(bar):
-    bw = DAY_WIDTH / bar["total_lanes"]
-    x0 = day_x(bar["d"]) + bar["lane_idx"] * bw + BAR_PAD
-    x1 = day_x(bar["d"]) + (bar["lane_idx"] + 1) * bw - BAR_PAD
+    bw = DAY_SPAN / bar["total_lanes"]
+    x0 = day_pos(bar["d"]) + bar["lane_idx"] * bw + BAR_PAD
+    x1 = day_pos(bar["d"]) + (bar["lane_idx"] + 1) * bw - BAR_PAD
     return x0, x1
 
 
@@ -147,25 +147,26 @@ def build_gantt_html(rows):
 
     fig = go.Figure()
 
-    # derive Y-axis range from actual data; fall back to 8am-10pm if empty
+    # derive X-axis range (Time) from actual data; fall back to 8am-10pm if empty
     if all_bars:
-        y_min = min(b["s"] for b in all_bars)
-        y_max = max(b["e"] for b in all_bars)
-        y_min = max(0,    (y_min // 60) * 60 - 30)   # floor to prev hour - 30 min padding
-        y_max = min(1440, (y_max // 60) * 60 + 90)   # ceil  to next hour + 30 min padding
+        x_min = min(b["s"] for b in all_bars)
+        x_max = max(b["e"] for b in all_bars)
+        x_min = max(0,    (x_min // 60) * 60 - 30)   # floor to prev hour - 30 min padding
+        x_max = min(1440, (x_max // 60) * 60 + 90)   # ceil  to next hour + 30 min padding
     else:
-        y_min, y_max = 480, 1320
+        x_min, x_max = 480, 1320
 
-    # draw alternating column backgrounds and divider lines
+    # draw alternating row backgrounds and divider lines (horizontal)
     shapes = []
     bg_colors = ["#f5f5f5", "#ffffff", "#f5f5f5", "#ffffff", "#f5f5f5"]
     for d in range(5):
-        shapes.append(dict(type="rect", x0=day_x(d), x1=day_x(d) + DAY_WIDTH,
-                           y0=y_min, y1=y_max, fillcolor=bg_colors[d],
+        shapes.append(dict(type="rect", x0=x_min, x1=x_max,
+                           y0=day_pos(d), y1=day_pos(d) + DAY_SPAN, fillcolor=bg_colors[d],
                            opacity=1.0, line=dict(width=0), layer="below"))
     for d in range(1, 5):
-        shapes.append(dict(type="line", x0=day_x(d) - DAY_GAP / 2, x1=day_x(d) - DAY_GAP / 2,
-                           y0=y_min, y1=y_max, line=dict(color="#bbbbbb", width=2), layer="below"))
+        shapes.append(dict(type="line", x0=x_min, x1=x_max,
+                           y0=day_pos(d) - DAY_GAP / 2, y1=day_pos(d) - DAY_GAP / 2,
+                           line=dict(color="#bbbbbb", width=2), layer="below"))
 
     # draw one Scatter trace per professor so legend click shows/hides their bars
     bars_by_prof = defaultdict(list)
@@ -177,15 +178,18 @@ def build_gantt_html(rows):
         py = []
         hover = []
         for bar in bars_by_prof[prof]:
-            x0, x1 = bar_coords(bar)
+            y0, y1 = bar_coords(bar)
+            x0 = bar["s"]
+            x1 = bar["e"]
             px += [x0, x1, x1, x0, x0, None]
-            py += [bar["s"], bar["s"], bar["e"], bar["e"], bar["s"], None]
+            py += [y0, y0, y1, y1, y0, None]
             tip = (f"<b>{bar['section']}</b><br>"
                    f"Type: {bar['ctype']}<br>"
                    f"Prof: {prof}<br>"
                    f"Time: {bar['ss']} \u2013 {bar['es']}<br>"
                    f"Day: {DAY_LABELS[bar['d']]}")
             hover += [tip, tip, tip, tip, tip, None]
+        
         fig.add_trace(go.Scatter(
             x=px, y=py,
             mode="lines",
@@ -199,16 +203,16 @@ def build_gantt_html(rows):
             text=hover,
         ))
 
-    # add section name labels inside each bar
+    # add section name labels inside each horizontal bar
     annotations = []
     for bar in all_bars:
-        x0, x1 = bar_coords(bar)
+        y0, y1 = bar_coords(bar)
         annotations.append(dict(
-            x=(x0 + x1) / 2,
-            y=(bar["s"] + bar["e"]) / 2,
+            x=(bar["s"] + bar["e"]) / 2,
+            y=(y0 + y1) / 2,
             text=bar["section"].replace("ENGR", "ENGR "),
             showarrow=False,
-            textangle=-90,
+            textangle=0, # Changed from -90 so text is readable horizontally
             xanchor="center",
             yanchor="middle",
             font=dict(size=11, color="white", family="monospace"),
@@ -217,28 +221,33 @@ def build_gantt_html(rows):
         ))
 
     # configure axes and layout
-    y_vals = list(range(y_min, y_max + 1, 60))
-    y_text = [f"{v // 60:02d}:00" for v in y_vals]
-    x_ticks = [day_x(d) + DAY_WIDTH / 2 for d in range(5)]
+    x_vals = list(range(x_min, x_max + 1, 60))
+    x_text = [f"{v // 60:02d}:00" for v in x_vals]
+    y_ticks = [day_pos(d) + DAY_SPAN / 2 for d in range(5)]
 
     fig.update_layout(
         shapes=shapes,
         annotations=annotations,
+        
+        # X-Axis is now TIME
         xaxis=dict(
-            tickmode="array", tickvals=x_ticks, ticktext=DAY_LABELS,
-            side="top", range=[-0.1, day_x(4) + DAY_WIDTH + 0.1],
+            tickmode="array", tickvals=x_vals, ticktext=x_text,
+            side="top", range=[x_min, x_max],
+            gridcolor="#e0e0e0", zeroline=False, fixedrange=False,
+        ),
+        
+        # Y-Axis is now DAYS
+        yaxis=dict(
+            tickmode="array", tickvals=y_ticks, ticktext=DAY_LABELS,
+            autorange="reversed", range=[-0.1, day_pos(4) + DAY_SPAN + 0.1],
             showgrid=False, zeroline=False, fixedrange=False,
             tickfont=dict(size=13, color="#222222"),
         ),
-        yaxis=dict(
-            tickmode="array", tickvals=y_vals, ticktext=y_text,
-            autorange="reversed", range=[y_min, y_max], title="Time",
-            gridcolor="#e0e0e0", zeroline=False, fixedrange=False,
-        ),
+        
         dragmode="zoom",
         plot_bgcolor="white",
         paper_bgcolor="white",
-        margin=dict(l=65, r=20, t=70, b=20),
+        margin=dict(l=80, r=20, t=110, b=20),
         hovermode="closest",
         legend=dict(
             title="Click to show/hide",
@@ -249,9 +258,9 @@ def build_gantt_html(rows):
         ),
         height=750,
         title=dict(
-            text="Weekly Class Schedule  (click legend to filter \u00b7 drag to zoom \u00b7 double-click to reset)",
+            text="Weekly Class Schedule<br><span style='font-size:11px;'>(click legend to filter \u00b7 drag to zoom \u00b7 double-click to reset)</span>",
             x=0.5,
-            font=dict(size=13),
+            font=dict(size=14),
         ),
     )
 
