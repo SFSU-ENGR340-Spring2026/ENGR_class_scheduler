@@ -155,10 +155,19 @@ class Scheduler:
                     vars_for_section[section.id].append(var)
                     vars_for_prof_slot[(prof.name, slot.id)].append(var)
 
-        # --- STEP 2: Rule "each section gets exactly one slot" ---
-        # Sum of all variables for that section must be 1 (exactly one assignment chosen).
+# --- STEP 2: Rule "each section gets exactly one slot" ---
+        problem_sections = []
         for section in self.sections:
-            model.Add(sum(vars_for_section[section.id]) == 1)
+            if not vars_for_section[section.id]:
+                # If a section has 0 valid variables, it's impossible to schedule
+                problem_sections.append(f"{section.course_id} (Sec {section.id})")
+            else:
+                model.Add(sum(vars_for_section[section.id]) == 1)
+        
+        # If any sections are unschedulable, stop the solver and send an error to the GUI
+        if problem_sections:
+            error_msg = f"Impossible to schedule: {', '.join(problem_sections)}. Check 'Can Teach', availability, and Slot Types."
+            raise ValueError(error_msg)
 
         # --- STEP 3: Rule "professor cannot teach overlapping times" ---
         # Your DB may contain multiple `slot_id`s whose time intervals overlap

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
+    QSplitter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -198,31 +199,44 @@ def build_gantt_html(rows):
             line=dict(color="white", width=1.5),
             name=prof,
             legendgroup=prof,
-            opacity=0.90,
+            opacity=1.0,
             hovertemplate="%{text}<extra></extra>",
             text=hover,
         ))
 
-    # add section name labels inside each horizontal bar
+   # add section name labels inside each horizontal bar
     annotations = []
     for bar in all_bars:
         y0, y1 = bar_coords(bar)
+        
+        # Ensure there is a space between ENGR and the number
+        # (e.g., "ENGR101-01" becomes "ENGR 101-01")
+        section_name = bar["section"].replace("ENGR", "ENGR ").replace("  ", " ")
+        
+        # Stack the course prefix/number and the section number
+        # This turns "ENGR 101-01" into "ENGR 101" on top and "-01" on the bottom
+        if "-" in section_name:
+            parts = section_name.split("-")
+            label_text = f"{parts[0]}<br>-{parts[1]}"
+        else:
+            label_text = section_name
+
         annotations.append(dict(
             x=(bar["s"] + bar["e"]) / 2,
             y=(y0 + y1) / 2,
-            text=bar["section"].replace("ENGR", "ENGR "),
+            text=label_text,
             showarrow=False,
-            textangle=0, # Changed from -90 so text is readable horizontally
+            textangle=0,
             xanchor="center",
             yanchor="middle",
-            font=dict(size=11, color="white", family="monospace"),
+            font=dict(size=10, color="black", family="monospace"),
             xref="x",
             yref="y",
         ))
 
     # configure axes and layout
-    x_vals = list(range(x_min, x_max + 1, 60))
-    x_text = [f"{v // 60:02d}:00" for v in x_vals]
+    x_vals = list(range(x_min, x_max + 1, 30)) # Changed step to 30
+    x_text = [f"{v // 60:02d}:{v % 60:02d}" for v in x_vals] # Added minutes calculation
     y_ticks = [day_pos(d) + DAY_SPAN / 2 for d in range(5)]
 
     fig.update_layout(
@@ -344,9 +358,27 @@ class SchedulerWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
-        main = QHBoxLayout(root)
-        main.addWidget(self._build_left_panel(), 3)
-        main.addWidget(self._build_right_panel(), 5)
+        
+        # Create a layout for the root widget
+        main_layout = QVBoxLayout(root)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # Create a horizontal splitter
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # Build the panels and add them to the splitter
+        left_panel = self._build_left_panel()
+        right_panel = self._build_right_panel()
+        
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        
+        # Maintain your original 3:5 size ratio
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 5)
+        
+        # Add the splitter to the main layout
+        main_layout.addWidget(splitter)
 
     def _build_left_panel(self):
         panel  = QWidget()
@@ -389,14 +421,24 @@ class SchedulerWindow(QMainWindow):
         self.db_tabs.addTab(self._sections_tab, "Sections")
         self.db_tabs.addTab(self._faculty_tab,  "Faculty")
         self.db_tabs.addTab(self._slots_tab,    "Time Slots")
-        layout.addWidget(self.db_tabs)
 
-        # small status log
+        # --- NEW: Create a vertical splitter ---
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_splitter.addWidget(self.db_tabs)
+
+        # dynamic status log
         self.log_box = QPlainTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setFixedHeight(60)
         self.log_box.setStyleSheet("font-size:11px;")
-        layout.addWidget(self.log_box)
+        # (setFixedHeight is removed so it can flex dynamically)
+        
+        left_splitter.addWidget(self.log_box)
+        
+        # Set default proportions: tabs get most of the space, log gets the bottom section
+        left_splitter.setStretchFactor(0, 5)
+        left_splitter.setStretchFactor(1, 1)
+
+        layout.addWidget(left_splitter)
 
         return panel
 
@@ -477,6 +519,7 @@ class SchedulerWindow(QMainWindow):
             self._log(f"Save error: {e}")
 
     def _run_solver(self):
+        self.log_box.clear()
         if not self.db_path.exists():
             self._log("Database not found.")
             return

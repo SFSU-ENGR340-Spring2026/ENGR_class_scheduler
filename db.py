@@ -45,7 +45,13 @@ def load_faculty(db_path):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
-    cur.execute("SELECT faculty_code, faculty_name FROM faculty ORDER BY faculty_code")
+    # Auto-migrate: Safely add the 'wtu' column to existing databases
+    try:
+        cur.execute("ALTER TABLE faculty ADD COLUMN wtu REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    cur.execute("SELECT faculty_code, faculty_name, wtu FROM faculty ORDER BY faculty_code")
     faculty = cur.fetchall()
 
     cur.execute("SELECT faculty_code, course_id FROM faculty_can_teach")
@@ -61,20 +67,39 @@ def load_faculty(db_path):
     conn.close()
 
     result = []
-    for code, name in faculty:
+    for code, name, wtu in faculty:
         courses_str = ", ".join(sorted(can_teach[code]))
-        result.append((code, name, courses_str, avail[code]))
+        # Format WTU cleanly (e.g., convert 3.0 to just "3")
+        w_str = ""
+        if wtu is not None:
+            w_str = str(wtu)
+            if w_str.endswith(".0"): w_str = w_str[:-2]
+            
+        result.append((code, name, w_str, courses_str, avail[code]))
     return result
 
 
 def save_faculty(db_path, rows):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
-    for code, name, courses_str, avail_dict in rows:
+    
+    try:
+        cur.execute("ALTER TABLE faculty ADD COLUMN wtu REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    for code, name, wtu, courses_str, avail_dict in rows:
         if not code.strip():
             continue
-        cur.execute("INSERT OR REPLACE INTO faculty (faculty_code, faculty_name) VALUES (?,?)",
-                    (code, name.strip()))
+            
+        # Safely convert WTU to a number, defaulting to 0 if left blank
+        try:
+            w_val = float(wtu)
+        except ValueError:
+            w_val = 0.0
+
+        cur.execute("INSERT OR REPLACE INTO faculty (faculty_code, faculty_name, wtu) VALUES (?,?,?)",
+                    (code, name.strip(), w_val))
         cur.execute("DELETE FROM faculty_can_teach WHERE faculty_code=?", (code,))
         for c in courses_str.split(","):
             c = c.strip()
