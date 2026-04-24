@@ -126,7 +126,12 @@ def build_gantt_html(rows):
     for row in rows:
         if len(row) < 5:
             continue
-        section, ctype, days, time_str, prof = row
+        section  = row[0]
+        ctype    = row[1]
+        days     = row[2]
+        time_str = row[3]
+        prof     = row[4]
+        room     = row[5] if len(row) >= 6 else ""
         try:
             ss, es = time_str.split("-")
             s = time_to_minutes(ss)
@@ -137,7 +142,7 @@ def build_gantt_html(rows):
             if ch in DAY_ORDER:
                 d = DAY_ORDER.index(ch)
                 bars_by_day[d].append(dict(section=section, ctype=ctype, prof=prof,
-                                           ss=ss, es=es, s=s, e=e))
+                                           room=room, ss=ss, es=es, s=s, e=e))
 
     # assign non-overlapping lanes per day, then flatten into one list
     all_bars = []
@@ -187,10 +192,11 @@ def build_gantt_html(rows):
             tip = (f"<b>{bar['section']}</b><br>"
                    f"Type: {bar['ctype']}<br>"
                    f"Prof: {prof}<br>"
+                   f"Room: {bar.get('room') or 'Need Room'}<br>"
                    f"Time: {bar['ss']} \u2013 {bar['es']}<br>"
                    f"Day: {DAY_LABELS[bar['d']]}")
             hover += [tip, tip, tip, tip, tip, None]
-        
+
         fig.add_trace(go.Scatter(
             x=px, y=py,
             mode="lines",
@@ -204,32 +210,22 @@ def build_gantt_html(rows):
             text=hover,
         ))
 
-   # add section name labels inside each horizontal bar
+   # add section name labels inside each bar
     annotations = []
     for bar in all_bars:
         y0, y1 = bar_coords(bar)
-        
-        # Ensure there is a space between ENGR and the number
-        # (e.g., "ENGR101-01" becomes "ENGR 101-01")
-        section_name = bar["section"].replace("ENGR", "ENGR ").replace("  ", " ")
-        
-        # Stack the course prefix/number and the section number
-        # This turns "ENGR 101-01" into "ENGR 101" on top and "-01" on the bottom
-        if "-" in section_name:
-            parts = section_name.split("-")
-            label_text = f"{parts[0]}<br>-{parts[1]}"
-        else:
-            label_text = section_name
+        # short label: just "100-01" instead of "ENGR100-01"
+        label = bar["section"].replace("ENGR", "").strip()
 
         annotations.append(dict(
             x=(bar["s"] + bar["e"]) / 2,
             y=(y0 + y1) / 2,
-            text=label_text,
+            text=label,
             showarrow=False,
             textangle=0,
             xanchor="center",
             yanchor="middle",
-            font=dict(size=10, color="black", family="monospace"),
+            font=dict(size=8, color="black", family="monospace"),
             xref="x",
             yref="y",
         ))
@@ -242,14 +238,14 @@ def build_gantt_html(rows):
     fig.update_layout(
         shapes=shapes,
         annotations=annotations,
-        
+
         # X-Axis is now TIME
         xaxis=dict(
             tickmode="array", tickvals=x_vals, ticktext=x_text,
             side="top", range=[x_min, x_max],
             gridcolor="#e0e0e0", zeroline=False, fixedrange=False,
         ),
-        
+
         # Y-Axis is now DAYS
         yaxis=dict(
             tickmode="array", tickvals=y_ticks, ticktext=DAY_LABELS,
@@ -257,7 +253,7 @@ def build_gantt_html(rows):
             showgrid=False, zeroline=False, fixedrange=False,
             tickfont=dict(size=13, color="#222222"),
         ),
-        
+
         dragmode="zoom",
         plot_bgcolor="white",
         paper_bgcolor="white",
@@ -358,25 +354,25 @@ class SchedulerWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
-        
+
         # Create a layout for the root widget
         main_layout = QVBoxLayout(root)
         main_layout.setContentsMargins(8, 8, 8, 8)
-        
+
         # Create a horizontal splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        
+
         # Build the panels and add them to the splitter
         left_panel = self._build_left_panel()
         right_panel = self._build_right_panel()
-        
+
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        
+
         # Maintain your original 3:5 size ratio
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 5)
-        
+
         # Add the splitter to the main layout
         main_layout.addWidget(splitter)
 
@@ -431,9 +427,9 @@ class SchedulerWindow(QMainWindow):
         self.log_box.setReadOnly(True)
         self.log_box.setStyleSheet("font-size:11px;")
         # (setFixedHeight is removed so it can flex dynamically)
-        
+
         left_splitter.addWidget(self.log_box)
-        
+
         # Set default proportions: tabs get most of the space, log gets the bottom section
         left_splitter.setStretchFactor(0, 5)
         left_splitter.setStretchFactor(1, 1)
@@ -542,7 +538,7 @@ class SchedulerWindow(QMainWindow):
         if not result:
             self._log("Solver finished but no feasible schedule found.")
             return
-        rows = [[sec, typ, days, time, prof] for sec, typ, days, time, prof in result]
+        rows = [[sec, typ, days, time, prof, room] for sec, typ, days, time, prof, room in result]
         rows.sort(key=lambda r: (r[0], r[3]))
         self.all_rows = rows
         self._apply_filters()
@@ -558,14 +554,14 @@ class SchedulerWindow(QMainWindow):
 
         filtered = []
         for row in self.all_rows:
-            r = (row + [""] * 5)[:5]
+            r = (row + [""] * 6)[:6]
             if f_sec  and f_sec  not in r[0].lower(): continue
             if f_type and f_type not in r[1].lower(): continue
             if f_day  and f_day  not in r[2].lower(): continue
             if f_prof and f_prof not in r[4].lower(): continue
             filtered.append(r)
 
-        headers = ["Section", "Type", "Days", "Time", "Professor"]
+        headers = ["Section", "Type", "Days", "Time", "Professor", "Room"]
         self.result_table.setSortingEnabled(False)
         self.result_table.clear()
         self.result_table.setColumnCount(len(headers))

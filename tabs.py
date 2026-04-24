@@ -254,8 +254,8 @@ class FacultyTab(QWidget):
         self.filter_edit.textChanged.connect(self._apply_filter)
         layout.addWidget(self.filter_edit)
 
-       # columns: Code, Name, Can Teach, M, T, W, R, F, ×
-        self.table = QTableWidget(0, 9)
+       # columns: Code, Name, WTU, Can Teach, M, T, W, R, F, ×
+        self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels([
             "Code", "Name", "WTU", "Can Teach",
             "M", "T", "W", "R", "F",
@@ -264,25 +264,27 @@ class FacultyTab(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(True)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        
+
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)          # Code
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # Name
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)          # WTU
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)          # Can Teach
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)          # M
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)          # T
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)          # W
+        hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)          # R
+        hdr.setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)          # F
+        hdr.setSectionResizeMode(9, QHeaderView.ResizeMode.Fixed)          # ×
         self.table.setColumnWidth(0, 80)
-        self.table.setColumnWidth(2, 200)
-        self.table.setColumnWidth(3, 125)  # M
-        self.table.setColumnWidth(4, 125)  # T
-        self.table.setColumnWidth(5, 125)  # W
-        self.table.setColumnWidth(6, 125)  # R
-        self.table.setColumnWidth(7, 125)  # F
-        self.table.setColumnWidth(8, 32)
+        self.table.setColumnWidth(2, 50)
+        self.table.setColumnWidth(3, 200)  # Can Teach
+        self.table.setColumnWidth(4, 125)  # M
+        self.table.setColumnWidth(5, 125)  # T
+        self.table.setColumnWidth(6, 125)  # W
+        self.table.setColumnWidth(7, 125)  # R
+        self.table.setColumnWidth(8, 125)  # F
+        self.table.setColumnWidth(9, 32)   # ×
         hdr.setMinimumHeight(36)
         layout.addWidget(self.table)
 
@@ -296,8 +298,8 @@ class FacultyTab(QWidget):
         search_term = text.lower()
         for r in range(self.table.rowCount()):
             match = False
-            # Check columns 0, 1, and 2 (Code, Name, Can Teach)
-            for c in range(3):
+            # Check Code (0), Name (1), and Can Teach (3)
+            for c in (0, 1, 3):
                 item = self.table.item(r, c)
                 if item and search_term in item.text().lower():
                     match = True
@@ -317,29 +319,30 @@ class FacultyTab(QWidget):
 
         self.table.setItem(r, 0, QTableWidgetItem(code))
         self.table.setItem(r, 1, QTableWidgetItem(name))
-        
-        # New WTU Column
+
+        # WTU column
         wtu_item = QTableWidgetItem(wtu)
         wtu_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
         self.table.setItem(r, 2, wtu_item)
-        
-        teach_item = QTableWidgetItem(courses)
 
-        # one TimeRangeWidget per day column (cols 3-7)
-        for col, day in enumerate(DAY_ORDER, start=3):
+        # Can Teach column
+        self.table.setItem(r, 3, QTableWidgetItem(courses))
+
+        # one TimeRangeWidget per day column (cols 4-8)
+        for col, day in enumerate(DAY_ORDER, start=4):
             if day in avail_dict:
                 is_avail = True
                 st, et = avail_dict[day]
             else:
                 is_avail = False
                 st, et = "08:00", "18:30"
-                
+
             time_widget = TimeRangeWidget(is_avail, st, et)
             self.table.setCellWidget(r, col, time_widget)
-            
+
         self.table.setRowHeight(r, 85) # Taller row to fit vertical stack
 
-        self.table.setCellWidget(r, 8, self._make_delete_btn(r))
+        self.table.setCellWidget(r, 9, self._make_delete_btn(r))
 
     def _make_delete_btn(self, row):
         btn = QPushButton("×")
@@ -355,7 +358,7 @@ class FacultyTab(QWidget):
 
     def _delete_row_by_btn(self, btn):
         for r in range(self.table.rowCount()):
-            w = self.table.cellWidget(r, 8)
+            w = self.table.cellWidget(r, 9)
             if w and w.findChild(QPushButton) is btn:
                 self._delete_row(r)
                 return
@@ -365,7 +368,7 @@ class FacultyTab(QWidget):
         for r in range(self.table.rowCount()):
             item_code = self.table.item(r, 0)
             code = item_code.text().strip() if item_code else ""
-            
+
             if not code:
                 # If there's already an empty row, highlight it and warn the user
                 self.table.selectRow(r)
@@ -373,10 +376,10 @@ class FacultyTab(QWidget):
                     self.table.scrollToItem(item_code)
                 QMessageBox.warning(self, "Notice", "Please enter a Faculty Code for the highlighted row before adding a new one.")
                 return
-                
+
         # Insert the new row
         self._insert_row()
-        
+
         # Automatically focus and start editing the "Code" cell of the new row
         new_row = self.table.rowCount() - 1
         self.table.setCurrentCell(new_row, 0)
@@ -401,7 +404,7 @@ class FacultyTab(QWidget):
             name  = self.table.item(r, 1).text().strip() if self.table.item(r, 1) else ""
             wtu   = self.table.item(r, 2).text().strip() if self.table.item(r, 2) else ""
             teach = self.table.item(r, 3).text().strip() if self.table.item(r, 3) else ""
-            
+
             if not code:
                 errors.append(f"Row {r + 1}: Code is required.")
                 continue
@@ -409,9 +412,9 @@ class FacultyTab(QWidget):
                 errors.append(f"Row {r + 1}: Duplicate code '{code}'.")
                 continue
             seen_codes.add(code)
-            
+
             avail = {}
-            for col, day in enumerate(DAY_ORDER, start=3):
+            for col, day in enumerate(DAY_ORDER, start=4):
                 w = self.table.cellWidget(r, col)
                 # Correctly check the internal CheckBox and QLineEdits
                 if w and w.cb.isChecked():

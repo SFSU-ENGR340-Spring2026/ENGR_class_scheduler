@@ -8,6 +8,18 @@ import sqlite3
 from collections import defaultdict
 
 
+def load_course_rooms(db_path):
+    """Return {course_id: [room, ...]} from the course_rooms table."""
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT course_id, room FROM course_rooms")
+    out = defaultdict(list)
+    for course, room in cur.fetchall():
+        out[course].append(room)
+    conn.close()
+    return dict(out)
+
+
 def load_sections(db_path):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
