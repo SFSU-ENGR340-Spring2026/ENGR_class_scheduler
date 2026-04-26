@@ -1,28 +1,32 @@
 # ENGR_Scheduler.spec
-# PyInstaller spec file — builds the ENGR Class Scheduler into a standalone Mac .app.
+# PyInstaller spec file — builds ENGR Class Scheduler for Mac (.app) and Windows (.exe).
 #
 # ── PREREQUISITES ──────────────────────────────────────────────────────────────
 #   pip install pyinstaller ortools PySide6 plotly
 #
 # ── HOW TO BUILD ───────────────────────────────────────────────────────────────
-#   1. Put all five files in one folder:
-#        gui.py  solver.py  db.py  tabs.py  db_classes.db  ENGR_Scheduler.spec
-#   2. Open Terminal in that folder and run:
-#        pyinstaller ENGR_Scheduler.spec
-#   3. Your app appears at:   dist/ENGR_Scheduler.app
+#   Put all these files in one folder:
+#       gui.py  solver.py  db.py  tabs.py  db_classes.db  ENGR_Scheduler.spec
 #
-# ── HOW TO DISTRIBUTE ──────────────────────────────────────────────────────────
-#   • Zip the entire dist/ folder and send it, OR
-#   • Copy ENGR_Scheduler.app to /Applications.
-#   • On first launch the app copies db_classes.db next to itself automatically.
-#     Users can then point the app at any folder containing their own DB via Browse.
+#   Mac:
+#       pyinstaller ENGR_Scheduler.spec
+#       → dist/ENGR_Scheduler.app
+#
+#   Windows (run in Command Prompt or PowerShell):
+#       pyinstaller ENGR_Scheduler.spec
+#       → dist/ENGR_Scheduler/ENGR_Scheduler.exe
+#
+# ── DISTRIBUTE ─────────────────────────────────────────────────────────────────
+#   Mac:     Zip dist/ENGR_Scheduler.app and share, or copy to /Applications
+#   Windows: Zip the entire dist/ENGR_Scheduler/ folder and share
 # ───────────────────────────────────────────────────────────────────────────────
 
 import sys
 import os
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
-# NOTE: block_cipher was removed in PyInstaller 6 — do not add it back.
+IS_MAC     = sys.platform == "darwin"
+IS_WIN     = sys.platform == "win32"
 
 ortools_datas = collect_data_files("ortools")
 plotly_datas  = collect_data_files("plotly")
@@ -37,21 +41,16 @@ a = Analysis(
         ortools_datas
         + plotly_datas
         + pyside6_datas
-        # Bundle the default database. On first launch gui.py copies it from
-        # _MEIPASS to the user-writable project folder automatically.
         + [("db_classes.db", ".")]
     ),
     hiddenimports=[
-        # OR-Tools
         "ortools",
         "ortools.sat",
         "ortools.sat.python",
         "ortools.sat.python.cp_model",
-        # Plotly
         "plotly",
         "plotly.graph_objects",
         "plotly.io",
-        # PySide6 / Qt
         "PySide6",
         "PySide6.QtCore",
         "PySide6.QtGui",
@@ -59,14 +58,12 @@ a = Analysis(
         "PySide6.QtWebEngineWidgets",
         "PySide6.QtWebEngineCore",
         "PySide6.QtNetwork",
-        # stdlib
         "sqlite3",
         "collections",
         "pathlib",
         "shutil",
         "subprocess",
         "platform",
-        # project modules
         "db",
         "tabs",
         "solver",
@@ -92,12 +89,13 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,           # no Terminal window
+    console=False,
     disable_windowed_traceback=False,
-    target_arch=None,  # native arch only; set "universal2" only if ALL deps are fat binaries
+    target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,               # replace with "icon.icns" if you have one
+    # Windows icon (.ico) / Mac icon (.icns) — replace None with path if you have one
+    icon="icon.ico" if IS_WIN else ("icon.icns" if IS_MAC else None),
 )
 
 coll = COLLECT(
@@ -111,17 +109,18 @@ coll = COLLECT(
     name="ENGR_Scheduler",
 )
 
-app = BUNDLE(
-    coll,
-    name="ENGR_Scheduler.app",
-    icon=None,               # replace with "icon.icns" if you have one
-    bundle_identifier="edu.sfsu.engr.scheduler",
-    info_plist={
-        "NSHighResolutionCapable": True,
-        "NSPrincipalClass": "NSApplication",
-        # Allow the WebEngine to load local/CDN content for the Gantt chart
-        "NSAppTransportSecurity": {
-            "NSAllowsArbitraryLoads": True,
+# Mac-only: wrap in .app bundle
+if IS_MAC:
+    app = BUNDLE(
+        coll,
+        name="ENGR_Scheduler.app",
+        icon="icon.icns" if os.path.exists("icon.icns") else None,
+        bundle_identifier="edu.sfsu.engr.scheduler",
+        info_plist={
+            "NSHighResolutionCapable": True,
+            "NSPrincipalClass": "NSApplication",
+            "NSAppTransportSecurity": {
+                "NSAllowsArbitraryLoads": True,
+            },
         },
-    },
-)
+    )
