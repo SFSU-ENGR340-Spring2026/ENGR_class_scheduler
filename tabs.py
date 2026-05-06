@@ -4,9 +4,9 @@ SectionsTab, FacultyTab, TimeSlotsTab — each loads/saves via db.py.
 """
 
 from PySide6.QtCore import Qt, QRect
-from PySide6.QtGui import QIntValidator, QPainter, QColor, QFont, QPen
+from PySide6.QtGui import QIntValidator, QPainter, QColor, QFont, QPalette, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QApplication, QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMessageBox, QPushButton, QSizePolicy, QStyledItemDelegate,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -133,30 +133,56 @@ class TimeRangeSlider(QWidget):
 
     def paintEvent(self, e):
         p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # --- DARK MODE DETECTION ---
+        palette = QApplication.palette()
+        # Check if the window background is dark (lightness < 128)
+        is_dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
+        
+        # Select colors based on the theme
+        text_color = QColor("#eeeeee") if is_dark else QColor("#333333")
+        track_bg   = QColor("#444444") if is_dark else QColor("#dddddd")
+        circle_bg  = QColor("#2d2d2d") if is_dark else QColor("#ffffff")
+        # ---------------------------
+
         x, y, tw = self._track()
         cbx = self.CBR+1; cby = self.LH+(self.height()-self.LH)//2
+        
+        # Draw the toggle circle
         p.setPen(QPen(QColor("#888"), 1.5))
-        p.setBrush(QColor("#4e79a7") if self._avail else QColor("#ffffff"))
+        p.setBrush(QColor("#4e79a7") if self._avail else circle_bg)
         p.drawEllipse(cbx-self.CBR, cby-self.CBR, self.CBR*2, self.CBR*2)
+        
         if self._avail:
             p.setPen(QPen(QColor("#ffffff"), 2))
             p.drawLine(cbx-3, cby, cbx-1, cby+2); p.drawLine(cbx-1, cby+2, cbx+3, cby-2)
+        
         if not self._avail:
-            p.setPen(QColor("#aaaaaa")); f=QFont(); f.setPointSize(9); p.setFont(f)
+            p.setPen(QColor("#888888") if is_dark else QColor("#aaaaaa"))
+            f=QFont(); f.setPointSize(9); p.setFont(f)
             p.drawText(self.CBR*2+self.CBG+2, cby+4, "Not available"); p.end(); return
-        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor("#dddddd"))
+            
+        # Draw the slider track
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(track_bg)
         p.drawRoundedRect(x, y, tw, self.TH, 3, 3)
+        
+        # Draw the active range
         lo_px = self._s2px(self._lo); hi_px = self._s2px(self._hi)
         p.setBrush(QColor("#4e79a7"))
         p.drawRoundedRect(lo_px, y, max(0, hi_px-lo_px), self.TH, 3, 3)
+        
+        # Draw ticks and handles
         p.setPen(QPen(QColor("#bbbbbb"), 1))
         for s in range(0, STEPS+1, 2):
             tx = self._s2px(s); p.drawLine(tx, y+self.TH, tx, y+self.TH+3)
+            
         for s in (self._lo, self._hi):
             hx = self._s2px(s); hw = self.HW
             p.setPen(QPen(QColor("#1a4f7f"), 1)); p.setBrush(QColor("#2a5f8f"))
             p.drawRoundedRect(hx-hw//2, y-5, hw, self.TH+10, 3, 3)
-        f=QFont(); f.setPointSize(8); p.setFont(f); p.setPen(QColor("#333333"))
+            
+        # --- THE FIX: Draw the time text with the dynamic text_color ---
+        f=QFont(); f.setPointSize(8); p.setFont(f); p.setPen(text_color)
         p.drawText(QRect(x,2,tw//2,self.LH-2), Qt.AlignmentFlag.AlignLeft,  _step2time(self._lo))
         p.drawText(QRect(x+tw//2,2,tw//2,self.LH-2), Qt.AlignmentFlag.AlignRight, _step2time(self._hi))
         p.end()
@@ -188,6 +214,16 @@ class SectionsTab(QWidget):
         self.filter_edit = QLineEdit(); self.filter_edit.setPlaceholderText("Filter sections...")
         self.filter_edit.textChanged.connect(self._filter); lay.addWidget(self.filter_edit)
         self.table = QTableWidget(0, 10)
+        self.table.setStyleSheet("""
+            QHeaderView::section {
+                color: palette(window-text);
+                background-color: palette(window);
+                border: 1px solid palette(mid);
+            }
+            QTableWidget {
+                gridline-color: palette(mid);
+            }
+        """)
         self.table.setHorizontalHeaderLabels(
             ["#","Course ID","Type","Slot Type","Cap","Major","Room","Freeze Slot","",""])
         self.table.verticalHeader().setVisible(False); self.table.setWordWrap(True)
@@ -294,6 +330,16 @@ class FacultyTab(QWidget):
         self.filter_edit = QLineEdit(); self.filter_edit.setPlaceholderText("Filter faculty...")
         self.filter_edit.textChanged.connect(self._filter); lay.addWidget(self.filter_edit)
         self.table = QTableWidget(0,11)
+        self.table.setStyleSheet("""
+            QHeaderView::section {
+                color: palette(window-text);
+                background-color: palette(window);
+                border: 1px solid palette(mid);
+            }
+            QTableWidget {
+                gridline-color: palette(mid);
+            }
+        """)
         self.table.setHorizontalHeaderLabels(
             ["Code","Name","WTU","Can Teach","Mon","Tue","Wed","Thu","Fri","",""])
         self.table.verticalHeader().setVisible(False)
@@ -410,6 +456,16 @@ class TimeSlotsTab(QWidget):
         self.filter_edit = QLineEdit(); self.filter_edit.setPlaceholderText("Filter time slots...")
         self.filter_edit.textChanged.connect(self._filter); lay.addWidget(self.filter_edit)
         self.table = QTableWidget(0,6)
+        self.table.setStyleSheet("""
+            QHeaderView::section {
+                color: palette(window-text);
+                background-color: palette(window);
+                border: 1px solid palette(mid);
+            }
+            QTableWidget {
+                gridline-color: palette(mid);
+            }
+        """)
         self.table.setHorizontalHeaderLabels(["ID","Slot Type","Day Pattern","Start","End",""])
         self.table.verticalHeader().setVisible(False)
         hdr = self.table.horizontalHeader()

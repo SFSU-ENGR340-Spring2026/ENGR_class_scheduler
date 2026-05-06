@@ -327,6 +327,32 @@ class SchedulerWindow(QMainWindow):
         if QMessageBox.question(self,"Reset","Overwrite DB with default?")!=QMessageBox.StandardButton.Yes: return
         self._make_backup(); shutil.copy(d,self.db_path)
         self._refresh_paths(); self._log("🔄  DB reset to default.")
+        
+    def closeEvent(self, event):
+        """Intercept the close event to prompt the user to save changes."""
+        # Create a message box with Save, Discard, and Cancel options
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Unsaved Changes")
+        msg_box.setText("Do you want to save your changes to the database before exiting?")
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Save | 
+                                   QMessageBox.StandardButton.Discard | 
+                                   QMessageBox.StandardButton.Cancel)
+        msg_box.setDefaultButton(QMessageBox.StandardButton.Save)
+        
+        choice = msg_box.exec()
+
+        if choice == QMessageBox.StandardButton.Save:
+            try:
+                self._save_db()
+                self._log("Final save successful. Closing...")
+                event.accept()
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", f"Could not save database: {e}")
+                event.ignore() # Keep window open if save fails
+        elif choice == QMessageBox.StandardButton.Discard:
+            event.accept() # Close without saving
+        else:
+            event.ignore() # Cancel the close action
 
     def _save_db(self):
         if not self.db_path.exists(): self._log("Database not found."); return
