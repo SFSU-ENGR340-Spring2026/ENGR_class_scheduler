@@ -4,12 +4,12 @@ Main window, Gantt chart, entry point.
 Tab classes in tabs.py. DB functions in db.py.
 """
 
-import platform, shutil, subprocess, sys, sqlite3
+import os, platform, shutil, subprocess, sys, sqlite3
 from collections import defaultdict
 from pathlib import Path
 
 import plotly.graph_objects as go
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
@@ -138,7 +138,7 @@ def build_gantt_html(rows):
                    "(click legend to filter · drag to zoom · double-click to reset)</span>",
                    x=0.5,font=dict(size=14)),
     )
-    raw = fig.to_html(include_plotlyjs="cdn",full_html=True)
+    raw = fig.to_html(include_plotlyjs=True,full_html=True)
     inject = """
 <style>
   #btn-bar{display:flex;gap:8px;padding:8px 12px 0 12px;}
@@ -198,12 +198,25 @@ class SchedulerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ENGR Class Scheduler"); self.resize(1400,860)
-        self.project_dir = (Path(sys.executable).parent.parent.parent.parent
-                            if getattr(sys,"frozen",False) else Path.cwd())
-        self.db_path = self.project_dir/"db_classes.db"
-        if not self.db_path.exists() and getattr(sys,"frozen",False):
-            bundled = Path(sys._MEIPASS)/"db_classes.db"
-            if bundled.exists(): shutil.copy(bundled, self.db_path)
+        if getattr(sys, "frozen", False):
+            base = Path(os.environ.get("APPDATA", Path.home())) if platform.system() == "Windows" else Path.home() / "Library" / "Application Support"
+            self.project_dir = base / "ENGR_Scheduler"
+            self.project_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.project_dir = Path.cwd()
+        self.db_path = self.project_dir / "db_classes.db"
+        if getattr(sys, "frozen", False):
+            bundled_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+            bundled_db = bundled_dir / "db_classes.db"
+            bundled_default = bundled_dir / "db_classes_default.db"
+            if not self.db_path.exists() and bundled_db.exists():
+                shutil.copy(bundled_db, self.db_path)
+            default_path = self.project_dir / "db_classes_default.db"
+            if not default_path.exists():
+                if bundled_default.exists():
+                    shutil.copy(bundled_default, default_path)
+                elif bundled_db.exists():
+                    shutil.copy(bundled_db, default_path)
         self.all_rows=[]; self._undo_stack=[]; self._section_slot_map={}
         self._build_ui(); self._refresh_paths(); self._ensure_default()
 
@@ -244,7 +257,12 @@ class SchedulerWindow(QMainWindow):
         self.db_tabs.addTab(self._slots_tab,"Time Slots")
         ls=QSplitter(Qt.Orientation.Vertical); ls.addWidget(self.db_tabs)
         self.log_box=QPlainTextEdit(); self.log_box.setReadOnly(True)
-        self.log_box.setStyleSheet("font-size:11px;"); ls.addWidget(self.log_box)
+        self.log_box.setStyleSheet("""
+            font-size:13px;
+            font-family: Menlo, Consolas, monospace;
+            line-height: 1.4;
+            padding: 6px;
+        """); ls.addWidget(self.log_box)
         ls.setStretchFactor(0,5); ls.setStretchFactor(1,1); lay.addWidget(ls)
         return panel
 
@@ -300,7 +318,8 @@ class SchedulerWindow(QMainWindow):
 
     def _make_backup(self):
         if not self.db_path.exists(): return
-        dest=self._backup_dir()/f"db_backup_{len(self._undo_stack)}.db"
+        import time
+        dest=self._backup_dir()/f"db_backup_{int(time.time()*1000)}.db"
         shutil.copy(self.db_path,dest); self._undo_stack.append(dest)
         while len(self._undo_stack)>MAX_UNDO:
             try: self._undo_stack.pop(0).unlink()
@@ -342,12 +361,11 @@ class SchedulerWindow(QMainWindow):
         choice = msg_box.exec()
 
         if choice == QMessageBox.StandardButton.Save:
-            try:
-                self._save_db()
+            if self._save_db():
                 self._log("Final save successful. Closing...")
                 event.accept()
-            except Exception as e:
-                QMessageBox.critical(self, "Save Error", f"Could not save database: {e}")
+            else:
+                QMessageBox.critical(self, "Save Error", "Could not save database. Check the log for details.")
                 event.ignore() # Keep window open if save fails
         elif choice == QMessageBox.StandardButton.Discard:
             event.accept() # Close without saving
@@ -355,12 +373,17 @@ class SchedulerWindow(QMainWindow):
             event.ignore() # Cancel the close action
 
     def _save_db(self):
-        if not self.db_path.exists(): self._log("Database not found."); return
+        if not self.db_path.exists():
+            self._log("Database not found.")
+            return False
         self._make_backup()
         try:
             self._sections_tab.save(); self._faculty_tab.save(); self._slots_tab.save()
             self._log("💾  Database saved.")
-        except Exception as e: self._log(f"Save error: {e}")
+            return True
+        except Exception as e:
+            self._log(f"Save error: {e}")
+            return False
 
     def _on_sel(self):
         has=bool(self.table.selectedItems())
@@ -422,27 +445,31 @@ class SchedulerWindow(QMainWindow):
 
     def _run_solver(self):
         self.log_box.clear()
-        if not self.db_path.exists(): self._log("Database not found."); return
+        if not self.db_path.exists():
+            self._log("Database not found.")
+            return
         try:
             self._sections_tab.save(); self._faculty_tab.save(); self._slots_tab.save()
-        except Exception as e: self._log(f"Save error: {e}"); return
-        self._log("Saved edits. Running solver…")
-        try: sched=Scheduler(str(self.db_path)); sched.load()
-        except Exception as e: self._log(f"Load error: {e}"); return
-        if getattr(sched,"skipped_no_faculty",[]):
-            from solver import NO_FACULTY_COURSES
-            self._log("─"*60); self._log("⚠️  UNSCHEDULED — No qualified faculty:")
-            by_course={}
-            for sid in sorted(sched.skipped_no_faculty):
-                by_course.setdefault(sid.rsplit("-",1)[0],[]).append(sid)
-            for cid,sids in sorted(by_course.items()):
-                self._log(f"   {cid} — {NO_FACULTY_COURSES.get(cid,cid)}")
-                self._log(f"      Sections: {', '.join(sids)}")
-            self._log(f"   Total skipped: {len(sched.skipped_no_faculty)} across {len(by_course)} courses")
-            self._log("─"*60)
-        try: result=sched.solve()
-        except Exception as e: self._log(f"Solver error: {e}"); return
-        if not result: self._log("Solver finished — no feasible schedule found."); return
+        except Exception as e:
+            self._log(f"Save error: {e}")
+            return
+
+        self._log("Saved edits. Running solver...")
+        try:
+            sched = Scheduler(str(self.db_path)); sched.load()
+        except Exception as e:
+            self._log(f"Load error: {e}")
+            return
+
+        try:
+            result = sched.solve()
+        except Exception as e:
+            self._log(f"Solver error: {e}")
+            return
+        if not result:
+            self._log("Solver finished — no schedulable sections were found.")
+            return
+
         self._section_slot_map={}
         try:
             conn=sqlite3.connect(str(self.db_path)); cur=conn.cursor()
@@ -452,32 +479,107 @@ class SchedulerWindow(QMainWindow):
                 try:
                     s,e=row[3].split("-"); sid=slookup.get((row[2],s,e))
                     if sid: self._section_slot_map[row[0]]=sid
-                except: pass
-        except: pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         db_info={}
         try:
             conn=sqlite3.connect(str(self.db_path)); cur=conn.cursor()
-            cur.execute("SELECT section_id,slot_type,capacity,major,lab_room,frozen_slot_id FROM db_classes")
+            cur.execute("SELECT section_id,slot_type,capacity,major,lab_room,frozen_slot_id,COALESCE(wtu,0) FROM db_classes")
             db_info={r[0]:r[1:] for r in cur.fetchall()}; conn.close()
-        except: pass
+        except Exception:
+            pass
+
         rows_full=[]
         for row in result:
             row=list(row); sec=row[0]; typ=row[1]; days=row[2]; time=row[3]; prof=row[4]; room=row[5] if len(row)>=6 else ""
-            info=db_info.get(sec,("","","","",""))
+            info=db_info.get(sec,("","","","","",""))
             stype=info[0] or ""; cap=str(info[1]) if info[1] else ""
             major=info[2] or ""
             if not room or room=="Need Room": room=info[3] or room
             frozen=str(info[4]) if info[4] else ""
-            rows_full.append([sec,typ,stype,days,time,prof,cap,major,room,frozen])
+            try:
+                wtu=f"{float(info[5] or 0):g}"
+            except (TypeError, ValueError):
+                wtu="0"
+            rows_full.append([sec,typ,stype,days,time,prof,cap,major,room,frozen,wtu])
         self.all_rows=_merge_shared(sorted(rows_full,key=lambda r:(r[0],r[4])))
         self._filter()
-        n=len(self.all_rows); skipped=len(getattr(sched,"skipped_no_faculty",[]))
-        self._log("─"*60); self._log(f"✅  SCHEDULE COMPLETE — {n} sections assigned.")
-        if skipped: self._log(f"⚠️  {skipped} section(s) skipped.")
-        viol=getattr(sched,"major_overlap_violations",0)
-        self._log("✅  All same-major sections at non-overlapping times." if not viol
-                  else f"⚠️  {viol} same-major conflict(s).")
-        self._log("─"*60)
+
+        sep = "─" * 38
+        n=len(self.all_rows)
+        skipped_sections = []
+        for sid in sorted(set(getattr(sched, "skipped_no_faculty", []))):
+            skipped_sections.append((sid, "no qualified faculty in Faculty tab"))
+        reasons=getattr(sched, "skip_reasons", {})
+        for sid in sorted(set(getattr(sched, "skipped_no_valid_assignment", []))):
+            skipped_sections.append((sid, reasons.get(sid, "no feasible assignment")))
+
+        self._log(sep)
+        if getattr(sched, "best_effort", False):
+            self._log(f"✅ FINAL BEST-EFFORT SCHEDULE — {n} sections assigned.")
+            self._log("⚠️ Strict constraints were softened where needed.")
+        else:
+            self._log(f"✅ SCHEDULE COMPLETE — {n} sections assigned.")
+
+        if skipped_sections:
+            self._log(f"⚠️ Skipped section(s) ({len(skipped_sections)}):")
+            for sid, reason in skipped_sections:
+                self._log(f"   {sid}: {reason}")
+        else:
+            self._log("✅ No sections skipped.")
+
+        missing_rooms=sorted(set(getattr(sched, "missing_room_sections", [])))
+        if missing_rooms:
+            self._log(f"⚠️ Lab/activity room not finalized ({len(missing_rooms)}): " + ", ".join(missing_rooms))
+            self._log("   Scheduled anyway as 'Need Lab Room'.")
+
+        invalid_frozen=sorted(set(getattr(sched, "invalid_frozen_sections", [])))
+        if invalid_frozen:
+            self._log("⚠️ Invalid frozen slot ignored: " + ", ".join(invalid_frozen))
+
+        major_details=getattr(sched, "major_overlap_details", [])
+        if major_details:
+            self._log(f"⚠️ Same-major conflict(s) ({len(major_details)}):")
+            for item in major_details:
+                self._log(f"   {item}")
+        else:
+            self._log("✅ No same-major conflicts.")
+
+        wtu_details=getattr(sched, "wtu_overload_details", [])
+        if wtu_details:
+            self._log(f"⚠️ Faculty WTU overload(s) ({len(wtu_details)}):")
+            for item in wtu_details:
+                self._log(f"   {item}")
+        else:
+            self._log("✅ No faculty WTU overloads.")
+
+        prof_details=getattr(sched, "professor_conflict_details", [])
+        if prof_details:
+            self._log(f"⚠️ Professor time conflict(s) ({len(prof_details)}):")
+            for item in prof_details:
+                self._log(f"   {item}")
+
+        room_details=getattr(sched, "room_conflict_details", [])
+        if room_details:
+            self._log(f"⚠️ Room conflict(s) ({len(room_details)}):")
+            for item in room_details:
+                self._log(f"   {item}")
+        self._log(sep)
+
+    def _write_gantt_file(self, html):
+        """Load Plotly from a local HTML file instead of setHtml().
+        QWebEngine's setHtml() can silently show a blank page when the inline
+        Plotly HTML is large because it is internally converted to a data URL.
+        """
+        try:
+            path = self.project_dir / ".gantt_schedule.html"
+            path.write_text(html, encoding="utf-8")
+            self.web.load(QUrl.fromLocalFile(str(path.resolve())))
+        except Exception:
+            self.web.setHtml(html)
 
     def _filter(self):
         if not self.all_rows: return
@@ -485,26 +587,28 @@ class SchedulerWindow(QMainWindow):
         fd=self.f_day.text().strip().lower(); fp=self.f_pro.text().strip().lower()
         filtered=[]
         for row in self.all_rows:
-            r=(row+[""]*10)[:10]
+            r=(row+[""]*11)[:11]
             if fs and fs not in r[0].lower(): continue
             if ft and ft not in r[1].lower(): continue
             if fd and fd not in r[3].lower(): continue
             if fp and fp not in r[5].lower(): continue
             filtered.append(r)
-        hdrs=["Section","Type","Slot Type","Days","Time","Professor","Cap","Major","Room","Frozen Slot"]
+        hdrs=["Section","Type","WTU","Slot Type","Days","Time","Professor","Cap","Major","Room","Frozen Slot"]
         self.table.setSortingEnabled(False); self.table.clear()
         self.table.setColumnCount(len(hdrs)); self.table.setHorizontalHeaderLabels(hdrs)
         self.table.setRowCount(len(filtered))
+        display_order = [0,1,10,2,3,4,5,6,7,8,9]
         for ri,row in enumerate(filtered):
-            for ci,val in enumerate(row):
+            for ci,src_i in enumerate(display_order):
+                val = row[src_i] if src_i < len(row) else ""
                 item=QTableWidgetItem(str(val))
-                if ci==6: item.setTextAlignment(Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignVCenter)
+                if ci in (2,7): item.setTextAlignment(Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(ri,ci,item)
         self.table.setSortingEnabled(True)
         self.summary.setText(f"Showing {len(filtered)} of {len(self.all_rows)} sections"
                              "  — select a row → 📌 Freeze to pin it")
         gantt_rows=[[r[0],r[1],r[3],r[4],r[5],r[8]] for r in filtered]
-        self.web.setHtml(build_gantt_html(gantt_rows))
+        self._write_gantt_file(build_gantt_html(gantt_rows))
 
     def _log(self, msg): self.log_box.appendPlainText(msg)
 

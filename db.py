@@ -23,15 +23,25 @@ def load_course_rooms(db_path):
     return dict(out)
 
 
+def _ensure_section_wtu_column(cur):
+    try:
+        cur.execute("ALTER TABLE db_classes ADD COLUMN wtu REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+
 def load_sections(db_path):
-    """Return every row from db_classes.
-    Tries full 8-column schema first; falls back to legacy 5-column schema."""
+    """Return every row from db_classes, including true per-section WTU.
+    WTU is the instructor workload unit from the course list, separate from
+    faculty.wtu, which is the faculty limit/target."""
     conn = sqlite3.connect(db_path)
     cur  = conn.cursor()
+    _ensure_section_wtu_column(cur)
+    conn.commit()
     try:
         cur.execute("""
             SELECT section_id, class_id, class_type, slot_type, capacity,
-                   major, lab_room, frozen_slot_id
+                   major, lab_room, frozen_slot_id, COALESCE(wtu, 0)
             FROM   db_classes
             ORDER  BY class_id, section_id
         """)
@@ -41,6 +51,9 @@ def load_sections(db_path):
             FROM   db_classes
             ORDER  BY class_id, section_id
         """)
+        rows = [r + ("", "", None, 0) for r in cur.fetchall()]
+        conn.close()
+        return rows
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -57,6 +70,7 @@ def save_sections(db_path, rows):
         "ALTER TABLE db_classes ADD COLUMN major          TEXT    DEFAULT ''",
         "ALTER TABLE db_classes ADD COLUMN lab_room       TEXT    DEFAULT ''",
         "ALTER TABLE db_classes ADD COLUMN frozen_slot_id INTEGER DEFAULT NULL",
+        "ALTER TABLE db_classes ADD COLUMN wtu            REAL    DEFAULT 0",
     ]:
         try:
             cur.execute(col_sql)
@@ -66,9 +80,12 @@ def save_sections(db_path, rows):
     for row in rows:
         if len(row) == 5:
             sid, cid, ctype, stype, cap = row
-            major, lab_room, frozen = "", "", None
-        else:
+            major, lab_room, frozen, wtu = "", "", None, 0
+        elif len(row) == 8:
             sid, cid, ctype, stype, cap, major, lab_room, frozen = row
+            wtu = 0
+        else:
+            sid, cid, ctype, stype, cap, major, lab_room, frozen, wtu = row
 
         sid_s = str(sid).strip()
         cid_s = str(cid).strip()
@@ -80,23 +97,28 @@ def save_sections(db_path, rows):
         except (ValueError, TypeError):
             frozen_val = None
 
+        try:
+            wtu_val = float(wtu) if wtu not in (None, "", "None") else 0.0
+        except (ValueError, TypeError):
+            wtu_val = 0.0
+
         cur.execute("SELECT 1 FROM db_classes WHERE section_id=?", (sid_s,))
         if cur.fetchone():
             cur.execute("""
                 UPDATE db_classes
                 SET    class_id=?, class_type=?, slot_type=?, capacity=?,
-                       major=?, lab_room=?, frozen_slot_id=?
+                       major=?, lab_room=?, frozen_slot_id=?, wtu=?
                 WHERE  section_id=?
             """, (cid_s, ctype, stype, cap, major or "", lab_room or "",
-                  frozen_val, sid_s))
+                  frozen_val, wtu_val, sid_s))
         else:
             cur.execute("""
                 INSERT INTO db_classes
                     (section_id, class_id, class_type, slot_type, capacity,
-                     major, lab_room, frozen_slot_id)
-                VALUES (?,?,?,?,?,?,?,?)
+                     major, lab_room, frozen_slot_id, wtu)
+                VALUES (?,?,?,?,?,?,?,?,?)
             """, (sid_s, cid_s, ctype, stype, cap,
-                  major or "", lab_room or "", frozen_val))
+                  major or "", lab_room or "", frozen_val, wtu_val))
 
     conn.commit()
     conn.close()

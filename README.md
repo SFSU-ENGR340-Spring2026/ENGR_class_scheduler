@@ -1,100 +1,171 @@
 # ENGR Class Scheduler
 
-Automated course scheduler for SFSU Engineering Department (Civil, ME, EE/CE, CompE).  
-Built with PySide6, Google OR-Tools CP-SAT, and Plotly.
+A desktop GUI app for editing ENGR course scheduling data and generating a weekly schedule with an OR-Tools constraint solver.
 
-**Team:** Joe Le (PM), Francisco, Nikita, Alan  
-**Course:** ENGR 340 — Spring 2026
+## Included files
 
----
-
-## What It Does
-
-- Assigns 132 course sections to time slots and faculty using a constraint satisfaction solver
-- Respects faculty availability, room assignments, WTU loads, and same-major non-overlap constraints
-- Provides a GUI to edit sections, faculty, and time slots directly
-- Displays results in a filterable Table View and interactive Gantt chart
-- Supports freeze/unfreeze to pin sections to specific time slots
-
----
+- `gui.py` - main PySide6 GUI, Gantt chart, solver controls, freeze/unfreeze tools.
+- `tabs.py` - editable Sections, Faculty, and Time Slots database tabs.
+- `db.py` - SQLite read/write helper functions and lightweight database migrations.
+- `solver.py` - OR-Tools CP-SAT scheduler.
+- `db_classes.db` - working plain SQLite database.
+- `db_classes_default.db` - default/reset plain SQLite database snapshot.
+- `schema.sql` - simple table-only database schema.
+- `health_check.py` - syntax and database consistency checker.
+- `ENGR_Scheduler.spec` - PyInstaller build file.
+- `requirements.txt` - Python dependencies.
+- `run_scheduler.py` - simple launcher.
+- `run_mac_linux.sh` / `run_windows.bat` - install dependencies and run from source.
+- `build_mac_linux.sh` / `build_windows.bat` - build a distributable app/executable with PyInstaller.
 
 ## Requirements
 
-- Python 3.10+
-- macOS or Windows
+- Python 3.10 or newer recommended.
+- On Windows, install Python from python.org and check **Add Python to PATH**.
+- On macOS, install Python 3 from python.org or Homebrew.
 
----
+## Run from source
 
-## Run from Source
+### Windows
 
-```bash
-# 1. Clone the repo
-git clone https://github.com/SFSU-ENGR340-Spring2026/ENGR_class_scheduler
-cd ENGR_class_scheduler
-
-# 2. Install dependencies
-pip install PySide6 ortools plotly
-
-# 3. Run
-python3 gui.py
-```
-
----
-
-## Build macOS App
-
-```bash
-pip install pyinstaller
-pyinstaller ENGR_Scheduler.spec
-```
-
-Output: `dist/ENGR_Scheduler.app`
-
-> If macOS blocks it on first launch: right-click → **Open** → **Open**
-
----
-
-## Build Windows Executable
-
-Run on a Windows machine:
+Double-click:
 
 ```bat
-pip install pyinstaller
-pyinstaller ENGR_Scheduler.spec
+run_windows.bat
 ```
 
-Output: `dist\ENGR_Scheduler\ENGR_Scheduler.exe`  
-Zip the entire `dist\ENGR_Scheduler\` folder to distribute.
+Or run manually:
 
----
+```bat
+py -3 -m venv .venv
+call .venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python gui.py
+```
 
-## Project Structure
+### macOS / Linux
 
-| File | Description |
-|------|-------------|
-| `gui.py` | Main window, Gantt chart, solver integration |
-| `tabs.py` | DB editor tabs (Sections, Faculty, Time Slots) |
-| `solver.py` | CP-SAT constraint solver |
-| `db.py` | SQLite read/write helpers |
-| `db_classes.db` | Live database |
-| `db_classes_default.db` | Default snapshot for reset |
-| `ENGR_Scheduler.spec` | PyInstaller build config |
+Run:
 
----
+```bash
+chmod +x run_mac_linux.sh
+./run_mac_linux.sh
+```
 
-## How to Use
+Or manually:
 
-1. Launch the app and set the project folder with **Browse**
-2. Edit sections, faculty, or time slots in the left panel tabs
-3. Click **Run Solver** — results appear in Table View and Gantt Chart
-4. Use **Freeze** to pin a section to its current slot (select a row first)
-5. Click **Save DB** to persist changes
-6. Use **Default** to reset to the original dataset
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python gui.py
+```
 
----
+## Build a distributable executable
 
-## Known Limitations
+Build on the same operating system you want to distribute for. For example, build the Windows `.exe` on Windows and the macOS `.app` on macOS.
 
-- Freeze/unfreeze from Gantt chart requires clicking a bar to select the section first
-- The solver does not enforce WTU caps per faculty member
-- Building for Windows requires running PyInstaller on a Windows machine
+### Windows
+
+```bat
+build_windows.bat
+```
+
+Output:
+
+```text
+dist\ENGR_Scheduler\ENGR_Scheduler.exe
+```
+
+Zip the entire `dist\ENGR_Scheduler` folder before sharing it.
+
+### macOS
+
+```bash
+chmod +x build_mac_linux.sh
+./build_mac_linux.sh
+```
+
+Output:
+
+```text
+dist/ENGR_Scheduler.app
+```
+
+Zip `dist/ENGR_Scheduler.app` before sharing it.
+
+### Linux
+
+```bash
+./build_mac_linux.sh
+```
+
+Output:
+
+```text
+dist/ENGR_Scheduler/ENGR_Scheduler
+```
+
+## How to use
+
+1. Open the app.
+2. Use the **Sections**, **Faculty**, and **Time Slots** tabs to edit scheduling data.
+3. Click **Save DB** to save edits.
+4. Click **Run Solver** to generate a schedule.
+5. Use the table filters or Gantt chart to inspect results.
+6. Select a section and click **Freeze** to pin it to its current slot, or **Unfreeze** to remove the pin.
+7. Use **Restore** to undo the last database save, or **Default** to reset to `db_classes_default.db`.
+
+## Architecture and pipeline
+
+This project is intentionally kept at a solid ENGR340 student-code level:
+
+1. `gui.py` starts the desktop app and owns the main window.
+2. `tabs.py` contains the editable table tabs for sections, faculty, and time slots.
+3. `db.py` is the only file that saves GUI edits back to SQLite.
+4. `solver.py` reads the database, builds the OR-Tools CP-SAT model, and returns schedule rows.
+5. `gui.py` displays the solver output in a table and a weekly Gantt chart.
+
+The database is plain SQLite. It has only these five data tables: `db_classes`, `faculty`, `faculty_can_teach`, `availability`, and `time_slots`. There are no views, triggers, stored procedures, or custom extensions. The only indexes are automatic primary-key indexes created by SQLite.
+
+## Health check
+
+Run this before submitting or building:
+
+```bash
+python health_check.py
+```
+
+It checks Python syntax, verifies the database has only the expected plain tables, and checks for blank IDs, orphan faculty records, and invalid frozen slots.
+
+## Notes
+
+- The first time a bundled executable runs, it copies the included database into the user's app data folder so edits persist.
+- The Gantt chart is written to `.gantt_schedule.html` inside the project folder.
+- If PyInstaller reports missing Qt WebEngine files, rebuild in a clean virtual environment and make sure `PySide6`, `PySide6-Addons`, and `PySide6-Essentials` are installed.
+- I verified the Python files compile successfully and the included databases pass `health_check.py`. I could not run the GUI/solver in this environment because PySide6 and OR-Tools are not installed here.
+
+## Troubleshooting
+
+### `ModuleNotFoundError: PySide6` or `ortools`
+
+Activate the virtual environment, then run:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### Blank Gantt chart
+
+Make sure the app has permission to write files in the selected project folder. The app writes `.gantt_schedule.html` locally and loads it into Qt WebEngine.
+
+### Solver returns skipped sections
+
+Check that each section has:
+
+- a matching `slot_type` in the Time Slots tab,
+- at least one faculty member who can teach its course ID,
+- faculty availability that covers the selected time slot,
+- a valid frozen slot if one is set.

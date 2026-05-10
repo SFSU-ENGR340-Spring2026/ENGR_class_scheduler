@@ -41,7 +41,7 @@ a = Analysis(
         ortools_datas
         + plotly_datas
         + pyside6_datas
-        + [("db_classes.db", ".")]
+        + [("db_classes.db", "."), ("db_classes_default.db", ".")]
     ),
     hiddenimports=[
         "ortools",
